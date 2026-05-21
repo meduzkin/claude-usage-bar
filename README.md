@@ -15,9 +15,12 @@ The menu bar title reads `session 37% · 87m` — **37%** of your current 5-hour
 
 - **plan usage** — colored progress bars for `current session` (5h), `current week` (7d), `current week opus`, `current week sonnet`. Green <60%, yellow 60–85%, red >85%. Colors adapt to dark/light mode.
 - **5h block** — cost, tokens, projected total, burn rate, reset time (from ccusage).
-- **last session** — most recent session id, cost, tokens, last activity.
+- **last session** — most recent session cost, tokens, last activity.
 - **daily ▸** / **weekly ▸** — submenus with the last 7 days / 4 weeks of cost & token totals.
+- **notifications ▸** — toggle macOS popup + sound + terminal-activate when Claude Code waits on a permission prompt longer than N seconds. Delay options: 30s / 60s / 120s / 300s. State is read from / written to `~/.claude/settings.json` atomically.
 - Refresh now (⌘R), Quit (⌘Q).
+
+The notifications feature is hook-based: when enabled, three entries are added to `~/.claude/settings.json` (`Notification`, `Stop`, `PreToolUse`) pointing at scripts installed at `~/.claude/scripts/`. Toggling off removes only those three entries — any other hooks you have in `settings.json` are preserved.
 
 ## Install
 

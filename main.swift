@@ -64,6 +64,9 @@ func blockTotalTokens(_ d: [String: Any]) -> Int {
     return 0
 }
 
+// Delay options offered in the notifications submenu (seconds).
+let NOTIF_DELAY_OPTIONS: [Int] = [30, 60, 120, 300]
+
 class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var timer: Timer?
@@ -71,6 +74,10 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let detailItem = NSMenuItem(title: "Loading…", action: nil, keyEquivalent: "")
     let dailyItem  = NSMenuItem(title: "daily",  action: nil, keyEquivalent: "")
     let weeklyItem = NSMenuItem(title: "weekly", action: nil, keyEquivalent: "")
+    let notifToggleItem = NSMenuItem(title: "notifications", action: nil, keyEquivalent: "")
+    let notifDelayItem  = NSMenuItem(title: "delay",         action: nil, keyEquivalent: "")
+    var notifEnabled = false
+    var notifDelay = 60
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -86,6 +93,11 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         weeklyItem.isHidden = true
         menu.addItem(dailyItem)
         menu.addItem(weeklyItem)
+        menu.addItem(.separator())
+        notifToggleItem.target = self
+        notifToggleItem.action = #selector(toggleNotif)
+        menu.addItem(notifToggleItem)
+        menu.addItem(notifDelayItem)
         menu.addItem(.separator())
         menu.addItem(withTitle: "Refresh now", action: #selector(refresh), keyEquivalent: "r").target = self
         menu.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "q").target = self
@@ -214,6 +226,66 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         populateHistorySubmenu(item: dailyItem, label: "daily",  rows: daily)
         populateHistorySubmenu(item: weeklyItem, label: "weekly", rows: weekly)
+
+        if let n = payload["notif"] as? [String: Any] {
+            notifEnabled = (n["enabled"] as? Bool) ?? false
+            notifDelay   = (n["delay"]   as? Int)  ?? 60
+        }
+        rebuildNotifSubmenu()
+    }
+
+    /// Rebuilds the two notification menu items (top-level toggle + delay
+    /// submenu parent) so they match the state read from settings.json.
+    /// Called on every refresh, so external edits to settings.json show up
+    /// after the next poll.
+    func rebuildNotifSubmenu() {
+        let toggleLabel = notifEnabled
+            ? "✓ notifications  on \(notifDelay)s"
+            : "  notifications  off"
+        notifToggleItem.attributedTitle = plain(toggleLabel)
+
+        notifDelayItem.attributedTitle = plain("    delay  (\(notifDelay)s)")
+        let sub = NSMenu()
+        for n in NOTIF_DELAY_OPTIONS {
+            let mi = NSMenuItem(
+                title: "",
+                action: #selector(pickDelay(_:)),
+                keyEquivalent: ""
+            )
+            mi.target = self
+            mi.tag = n
+            let marker = (notifEnabled && n == notifDelay) ? "✓ " : "   "
+            mi.attributedTitle = plain("\(marker)\(n)s")
+            sub.addItem(mi)
+        }
+        notifDelayItem.submenu = sub
+    }
+
+    @objc func toggleNotif() {
+        let target = notifEnabled ? "off" : "on"
+        let args = target == "on"
+            ? ["set", "on", String(notifDelay)]
+            : ["set", "off"]
+        runNotifControl(args: args)
+    }
+
+    @objc func pickDelay(_ sender: NSMenuItem) {
+        guard sender.tag > 0 else { return }
+        runNotifControl(args: ["set", "on", String(sender.tag)])
+    }
+
+    /// Runs the notif.sh control script and triggers a refresh on success
+    /// so the menu reflects the new state immediately.
+    func runNotifControl(args: [String]) {
+        let scriptPath = (SCRIPT_PATH as NSString).deletingLastPathComponent + "/notif.sh"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let task = Process()
+            task.launchPath = "/bin/bash"
+            task.arguments = [scriptPath] + args
+            try? task.run()
+            task.waitUntilExit()
+            DispatchQueue.main.async { self?.refresh() }
+        }
     }
 
     func populateHistorySubmenu(item: NSMenuItem, label: String, rows: [[String: Any]]) {

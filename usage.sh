@@ -109,9 +109,14 @@ daily=$($CC  daily          --json 2>/dev/null   || echo '{"daily":[],"totals":{
 weekly=$($CC weekly         --json 2>/dev/null   || echo '{"weekly":[],"totals":{}}')
 session=$($CC session       --json 2>/dev/null   || echo '{"session":[],"totals":{}}')
 
-python3 - "$oauth" "$blocks" "$daily" "$weekly" "$session" <<'PY'
+# Notification hook state from ~/.claude/settings.json (handled by notif.sh
+# living alongside this script). Cheap to read on every refresh — pure
+# local file, no I/O over the network.
+notif=$("$(dirname "$0")/notif.sh" state 2>/dev/null || echo '{"enabled":false,"delay":60}')
+
+python3 - "$oauth" "$blocks" "$daily" "$weekly" "$session" "$notif" <<'PY'
 import json, sys
-ou, b, d, w, s = (json.loads(x) for x in sys.argv[1:6])
+ou, b, d, w, s, n = (json.loads(x) for x in sys.argv[1:7])
 sessions = s.get("session") or []
 def last_activity(x):
     return (x.get("metadata") or {}).get("lastActivity") or ""
@@ -122,6 +127,7 @@ out = {
     "daily":   (d.get("daily")  or [])[-7:],
     "weekly":  (w.get("weekly") or [])[-4:],
     "session": sessions_sorted[-1] if sessions_sorted else None,
+    "notif":   n,
 }
 print(json.dumps(out))
 PY

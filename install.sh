@@ -40,6 +40,9 @@ fi
 if ! command -v python3 >/dev/null 2>&1; then
   missing+=("python3 — required for JSON parsing in usage.sh")
 fi
+if ! command -v jq >/dev/null 2>&1; then
+  missing+=("jq — required by the notification hook scripts (brew install jq)")
+fi
 if ! command -v npx >/dev/null 2>&1 && ! command -v ccusage >/dev/null 2>&1; then
   missing+=("npx or ccusage — install Node.js (or 'npm i -g ccusage') for cost data")
 fi
@@ -66,6 +69,16 @@ if [ "$need_build" -eq 1 ]; then
 else
   echo "==> using pre-built binary: $BIN"
 fi
+
+# Deploy notification hook scripts to ~/.claude/scripts/ so the widget's
+# "notifications" toggle has something to enable. Files are overwritten
+# unconditionally — they are stateless and identical across versions.
+SCRIPTS_TARGET="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/scripts"
+mkdir -p "$SCRIPTS_TARGET"
+cp "$HERE/scripts/claude-notify.sh" "$HERE/scripts/claude-notify-cancel.sh" "$SCRIPTS_TARGET/"
+chmod +x "$SCRIPTS_TARGET/claude-notify.sh" "$SCRIPTS_TARGET/claude-notify-cancel.sh"
+echo "==> notification hook scripts deployed to $SCRIPTS_TARGET/"
+echo "    enable them later from the menu bar dropdown (notifications ▸)"
 
 if [ "$autostart" -eq 0 ]; then
   printf "\nInstall LaunchAgent so the widget starts at login? [y/N] "
