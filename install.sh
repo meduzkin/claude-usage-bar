@@ -108,10 +108,11 @@ fi
 # overwriting is safe.
 SCRIPTS_TARGET="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/scripts"
 mkdir -p "$SCRIPTS_TARGET"
-cp "$HERE/scripts/claude-notify.sh" "$HERE/scripts/claude-notify-cancel.sh" "$SCRIPTS_TARGET/"
-chmod +x "$SCRIPTS_TARGET/claude-notify.sh" "$SCRIPTS_TARGET/claude-notify-cancel.sh"
-echo "==> notification hook scripts deployed to $SCRIPTS_TARGET/"
-echo "    enable them later from the menu bar dropdown (notifications)"
+cp "$HERE/scripts/claude-notify.sh" "$HERE/scripts/claude-notify-cancel.sh" "$HERE/scripts/statusline.sh" "$SCRIPTS_TARGET/"
+chmod +x "$SCRIPTS_TARGET/claude-notify.sh" "$SCRIPTS_TARGET/claude-notify-cancel.sh" "$SCRIPTS_TARGET/statusline.sh"
+echo "==> hook + statusline scripts deployed to $SCRIPTS_TARGET/"
+echo "    enable notifications from the menu bar dropdown"
+echo "    add statusline.sh to Claude Code: set \"statusline\": {\"command\": \"$SCRIPTS_TARGET/statusline.sh\"} in ~/.claude/settings.json"
 
 if [ "$autostart" -eq 0 ]; then
   printf "\nInstall LaunchAgent so the widget starts at login? [y/N] "

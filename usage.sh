@@ -114,9 +114,28 @@ session=$($CC session       --json 2>/dev/null   || echo '{"session":[],"totals"
 # local file, no I/O over the network.
 notif=$("$(dirname "$0")/notif.sh" state 2>/dev/null || echo '{"enabled":false,"delay":60}')
 
-python3 - "$oauth" "$blocks" "$daily" "$weekly" "$session" "$notif" <<'PY'
+# Anthropic service status from their public Statuspage. Same widget poll
+# cadence as the oauth endpoint — and it's cached at one level lower
+# (Statuspage CDN) so we don't have to worry about rate limits here.
+service_status=$(curl -fsSL --max-time 5 https://status.anthropic.com/api/v2/status.json 2>/dev/null || echo '{}')
+service_status=$(python3 - "$service_status" <<'PY'
 import json, sys
-ou, b, d, w, s, n = (json.loads(x) for x in sys.argv[1:7])
+try:
+    d = json.loads(sys.argv[1])
+    s = d.get("status") or {}
+    out = {
+        "indicator":   s.get("indicator")   or "none",
+        "description": s.get("description") or "Unknown",
+    }
+except Exception:
+    out = {"indicator": "unknown", "description": "Unknown"}
+print(json.dumps(out))
+PY
+)
+
+python3 - "$oauth" "$blocks" "$daily" "$weekly" "$session" "$notif" "$service_status" <<'PY'
+import json, sys
+ou, b, d, w, s, n, svc = (json.loads(x) for x in sys.argv[1:8])
 sessions = s.get("session") or []
 def last_activity(x):
     return (x.get("metadata") or {}).get("lastActivity") or ""
@@ -128,6 +147,7 @@ out = {
     "weekly":  (w.get("weekly") or [])[-4:],
     "session": sessions_sorted[-1] if sessions_sorted else None,
     "notif":   n,
+    "service": svc,
 }
 print(json.dumps(out))
 PY

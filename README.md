@@ -19,7 +19,11 @@ The menu bar title reads `session 37% · 87m` — **37%** of your current 5-hour
 - **daily ▸** / **weekly ▸** — submenus with the last 7 days / 4 weeks of cost & token totals.
 - **notifications** + **delay ▸** — toggle macOS popup + sound + terminal-activate when Claude Code waits on a permission prompt longer than N seconds. Delay options: 30s / 60s / 120s / 300s. State is read from / written to `~/.claude/settings.json` atomically.
 - **alert** + **threshold ▸** — when the current 5-hour utilization first crosses a threshold (70% / 80% / 90% / 95%), the widget posts a macOS notification. Fires at most once per window — a new 5h window re-arms the alert.
-- Refresh now (⌘R), Quit (⌘Q).
+- **refresh interval ▸** — how often the widget polls `/api/oauth/usage` in the background. Options: 5 / 10 / 15 / 20 / 30 minutes (default 10). Picking a value reschedules the timer immediately and persists the choice to `~/.cache/claude-usage-bar/interval.json`. The dropdown still triggers an on-open refresh with a 30 s cooldown regardless.
+- **pace projection** — inside `plan usage`, an extra `pace` line shows the projected end-of-window utilization at the current burn rate (e.g. `→ 87% projected at reset` or `⚠ 142% at reset (hits 100% in 38m)`). Colour matches the projected tier.
+- **service status badge** — when `status.anthropic.com` reports a minor / major / critical incident, the widget surfaces it at the top of the dropdown with the upstream description. Cleared once Anthropic flips back to "All Systems Operational".
+- **Check for updates…** — menu action that hits the GitHub Releases API, compares against the embedded `WIDGET_VERSION`, and (on user confirm) downloads + atomically replaces the running binary + relaunches.
+- Refresh now (⌘R), Check for updates…, Quit (⌘Q).
 
 The notifications feature is hook-based: when enabled, three entries are added to `~/.claude/settings.json` (`Notification`, `Stop`, `PreToolUse`) pointing at scripts installed at `~/.claude/scripts/`. Toggling off removes only those three entries — any other hooks you have in `settings.json` are preserved.
 
@@ -78,12 +82,28 @@ For headless / CI setups, set `CLAUDE_CREDS=/path/to/file` and `usage.sh` reads 
 - **`usage.sh`** — resolves the OAuth token, calls `https://api.anthropic.com/api/oauth/usage` with the `anthropic-beta: oauth-2025-04-20` header for plan utilization, runs `ccusage` (`blocks --active`, `daily`, `weekly`, `session`) for cost data, and merges everything into one JSON blob via inline `python3`.
 - Successful API responses are cached at `~/.cache/claude-usage-bar/oauth.json`. The endpoint rate-limits aggressively (429s within a few requests per minute), so on failure the widget falls back to the cached response — the bars stay visible even when the endpoint refuses to talk to us.
 - On a `401` `usage.sh` re-reads from keychain and retries once, in case Claude Code rotated the token.
-- **`main.swift`** — Cocoa app with `NSStatusItem`, refreshes every 15 minutes in the background **plus** every time you open the dropdown (with a 30-second cooldown to avoid spamming the rate-limited endpoint). All menu items wrap their content in custom `NSView`s with opaque backgrounds so the dropdown reads more solidly than the default vibrancy material.
+- **`main.swift`** — Cocoa app with `NSStatusItem`, refreshes every `refresh interval` minutes (user-configurable from the dropdown; default 10) **plus** every time you open the dropdown (with a 30-second cooldown to avoid spamming the rate-limited endpoint). All menu items wrap their content in custom `NSView`s with opaque backgrounds so the dropdown reads more solidly than the default vibrancy material.
 - **`build.sh`** — produces a universal binary (`swiftc` + `lipo` over arm64 and x86_64 slices).
+
+## Claude Code statusline
+
+The repo ships `scripts/statusline.sh`. `install.sh` drops it into `~/.claude/scripts/` along with the notification hooks. Wire it into Claude Code's statusline by setting in `~/.claude/settings.json`:
+
+```json
+{
+  "statusline": { "command": "~/.claude/scripts/statusline.sh" }
+}
+```
+
+The script reads only from the local cache (`~/.cache/claude-usage-bar/oauth.json`) so it adds zero network latency to your prompts. Output: `<color>NN%<reset> →PP% · Mh MMm`, where `NN` is current 5h utilization (colour-tiered), `PP` is projected end-of-window pace, and `Mh MMm` is time to reset.
+
+## Cross-platform (Linux / Windows)
+
+`cross-platform/` contains a Python + `pystray` proof of concept covering the core surface — tray badge, dropdown with alert / threshold / interval / refresh, service-status tooltip. See [`cross-platform/README.md`](cross-platform/README.md). The Swift app remains the canonical implementation on macOS; the Python tray is for non-Mac machines where the Swift binary doesn't run.
 
 ## Known limits
 
-- The `/api/oauth/usage` endpoint is throttled — background refresh is locked at 15 min and on-open at 30s cooldown to stay clear of the rate limit. If you hit a 429 anyway, the widget shows cached values until the next successful call.
+- The `/api/oauth/usage` endpoint is throttled. The background refresh interval is user-configurable (5/10/15/20/30 min; default 10) and the dropdown on-open refresh is gated by a 30-second cooldown. If you hit a 429 anyway, the widget shows cached values until the next successful call.
 - `ccusage` cost figures are estimates from local JSONL session files and won't exactly match Anthropic's internal billing.
 - No notarization / code signing — macOS Gatekeeper may warn on first launch if the binary was downloaded as a zip (cloning via git is fine, no quarantine attribute is set).
 

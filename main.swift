@@ -18,12 +18,14 @@ let SCRIPT_PATH: String = {
 }()
 
 // The /api/oauth/usage endpoint is rate-limited fairly aggressively
-// (429s within a few requests/minute). Background poll is generous
-// (15 min) so we never re-trigger throttling; on-demand refresh
-// happens when the user opens the dropdown — gated by ON_OPEN_COOLDOWN
-// so repeated clicks don't spam the endpoint either.
-let REFRESH_SECONDS: TimeInterval = 900
+// (429s within a few requests/minute). The background poll interval is
+// user-configurable from the dropdown — these are the offered options.
+// Default 10 min keeps us well clear of the throttle while still giving
+// reasonably fresh percentages.
+let INTERVAL_OPTIONS: [Int] = [5, 10, 15, 20, 30]   // minutes
+let DEFAULT_INTERVAL_MINUTES: Int = 10
 let ON_OPEN_COOLDOWN: TimeInterval = 30
+let INTERVAL_CONFIG_PATH: String = "\(NSHomeDirectory())/.cache/claude-usage-bar/interval.json"
 
 func shortModel(_ raw: String) -> String {
     // claude-opus-4-7 -> opus-4.7
@@ -64,6 +66,11 @@ func blockTotalTokens(_ d: [String: Any]) -> Int {
     return 0
 }
 
+// Widget version, bumped manually each release. Compared against the
+// `tag_name` of the latest Release fetched from `UPDATE_API_URL`.
+let WIDGET_VERSION = "0.2.0"
+let UPDATE_API_URL = "https://api.github.com/repos/meduzkin/claude-usage-bar/releases/latest"
+
 // Delay options offered in the notifications submenu (seconds).
 let NOTIF_DELAY_OPTIONS: [Int] = [30, 60, 120, 300]
 // Threshold options offered in the usage-alert submenu (percent).
@@ -92,6 +99,9 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var alertThreshold = 90
     var alertedWindowResetsAt: String? = nil
 
+    let intervalItem = NSMenuItem(title: "refresh interval", action: nil, keyEquivalent: "")
+    var refreshIntervalMinutes = DEFAULT_INTERVAL_MINUTES
+
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "claude …"
@@ -117,14 +127,30 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(alertToggleItem)
         menu.addItem(alertThresholdItem)
         menu.addItem(.separator())
+        menu.addItem(intervalItem)
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Refresh now", action: #selector(refresh), keyEquivalent: "r").target = self
+        menu.addItem(withTitle: "Check for updates…", action: #selector(checkForUpdates), keyEquivalent: "").target = self
+        let aboutItem = NSMenuItem(title: "version \(WIDGET_VERSION)", action: nil, keyEquivalent: "")
+        aboutItem.isEnabled = false
+        menu.addItem(aboutItem)
         menu.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "q").target = self
         statusItem.menu = menu
 
         loadAlertConfig()
+        loadIntervalConfig()
+        rebuildIntervalSubmenu()
 
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: REFRESH_SECONDS, repeats: true) { [weak self] _ in
+        scheduleTimer()
+    }
+
+    /// (Re)installs the background refresh timer at the current
+    /// `refreshIntervalMinutes`. Invalidates any prior timer.
+    func scheduleTimer() {
+        timer?.invalidate()
+        let seconds = TimeInterval(refreshIntervalMinutes * 60)
+        timer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: true) { [weak self] _ in
             self?.refresh()
         }
     }
@@ -199,12 +225,29 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // ── dropdown body ───────────────────────────────────────────────
         let out = NSMutableAttributedString()
 
+        // Service-status badge — only renders when Anthropic is not "none".
+        if let svc = payload["service"] as? [String: Any],
+           let ind = svc["indicator"] as? String, ind != "none" && ind != "unknown" {
+            let desc = (svc["description"] as? String) ?? "Service degraded"
+            let badge = serviceStatusBadge(indicator: ind, description: desc)
+            out.append(badge)
+            out.append(plain("\n"))
+        }
+
         if fiveHour != nil || sevenDay != nil {
             out.append(plain("◆ plan usage\n"))
             if let f = fiveHour { appendBucketLine(out, label: "current session       ", b: f) }
             if let s = sevenDay { appendBucketLine(out, label: "current week          ", b: s) }
             if let o = oauth["seven_day_opus"]   as? [String: Any] { appendBucketLine(out, label: "current week opus     ", b: o) }
             if let s = oauth["seven_day_sonnet"] as? [String: Any] { appendBucketLine(out, label: "current week sonnet   ", b: s) }
+
+            // Pace marker: projected end-of-window utilization at current burn.
+            if let pct = fiveHourPct, let mins = fiveHourResetMin {
+                if let line = paceLine(currentPct: pct, minutesUntilReset: mins) {
+                    out.append(line)
+                    out.append(plain("\n"))
+                }
+            }
             out.append(plain("\n"))
         }
 
@@ -337,6 +380,52 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// Rebuilds the refresh-interval parent label + its submenu of choices.
+    func rebuildIntervalSubmenu() {
+        intervalItem.attributedTitle = plain("refresh interval  (\(refreshIntervalMinutes)m)")
+        let sub = NSMenu()
+        for m in INTERVAL_OPTIONS {
+            let mi = NSMenuItem(
+                title: "",
+                action: #selector(pickInterval(_:)),
+                keyEquivalent: ""
+            )
+            mi.target = self
+            mi.tag = m
+            let marker = (m == refreshIntervalMinutes) ? "✓ " : "   "
+            mi.attributedTitle = plain("\(marker)\(m) min")
+            sub.addItem(mi)
+        }
+        intervalItem.submenu = sub
+    }
+
+    @objc func pickInterval(_ sender: NSMenuItem) {
+        guard sender.tag > 0 else { return }
+        refreshIntervalMinutes = sender.tag
+        saveIntervalConfig()
+        scheduleTimer()
+        rebuildIntervalSubmenu()
+    }
+
+    func loadIntervalConfig() {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: INTERVAL_CONFIG_PATH)),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let m = obj["minutes"] as? Int,
+              INTERVAL_OPTIONS.contains(m)
+        else { return }
+        refreshIntervalMinutes = m
+    }
+
+    func saveIntervalConfig() {
+        let obj: [String: Any] = ["minutes": refreshIntervalMinutes]
+        let dir = (INTERVAL_CONFIG_PATH as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true, attributes: nil
+        )
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]) else { return }
+        try? data.write(to: URL(fileURLWithPath: INTERVAL_CONFIG_PATH), options: .atomic)
+    }
+
     func loadAlertConfig() {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: ALERT_CONFIG_PATH)),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -345,6 +434,130 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alertThreshold       = (obj["threshold"] as? Int)    ?? 90
         alertedWindowResetsAt = obj["alertedWindowResetsAt"] as? String
     }
+
+    // ── self-update ─────────────────────────────────────────────────────
+
+    @objc func checkForUpdates() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let info = self.fetchLatestRelease()
+            DispatchQueue.main.async { self.handleUpdateInfo(info) }
+        }
+    }
+
+    /// Returns the latest release's tag + download URL of the
+    /// `claude-usage-bar` asset, or nil on any error.
+    func fetchLatestRelease() -> (tag: String, downloadURL: String)? {
+        guard let url = URL(string: UPDATE_API_URL),
+              let data = try? Data(contentsOf: url),
+              let obj  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tag  = obj["tag_name"] as? String
+        else { return nil }
+        let assets = obj["assets"] as? [[String: Any]] ?? []
+        guard let asset = assets.first(where: { ($0["name"] as? String) == "claude-usage-bar" }),
+              let dl = asset["browser_download_url"] as? String
+        else { return nil }
+        return (tag, dl)
+    }
+
+    func handleUpdateInfo(_ info: (tag: String, downloadURL: String)?) {
+        guard let info else {
+            showInfo(title: "Update check failed",
+                     message: "Couldn't reach \(UPDATE_API_URL). Check your network or try again later.")
+            return
+        }
+        let remote = info.tag.hasPrefix("v") ? String(info.tag.dropFirst()) : info.tag
+        if compareVersions(remote, WIDGET_VERSION) <= 0 {
+            showInfo(title: "Up to date",
+                     message: "You're on \(WIDGET_VERSION). Latest release is \(info.tag).")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Update available: \(info.tag)"
+        alert.informativeText = "You're on \(WIDGET_VERSION). Download and install \(info.tag) now? The widget will relaunch automatically."
+        alert.addButton(withTitle: "Download & Install")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            performUpdate(from: info.downloadURL)
+        }
+    }
+
+    /// Lexicographic-ish semver compare. Returns -1/0/1.
+    func compareVersions(_ a: String, _ b: String) -> Int {
+        let pa = a.split(separator: ".").compactMap { Int($0) }
+        let pb = b.split(separator: ".").compactMap { Int($0) }
+        let n = max(pa.count, pb.count)
+        for i in 0..<n {
+            let x = i < pa.count ? pa[i] : 0
+            let y = i < pb.count ? pb[i] : 0
+            if x != y { return x < y ? -1 : 1 }
+        }
+        return 0
+    }
+
+    /// Downloads the new binary to a tempfile, atomically replaces the
+    /// current binary, then relaunches and quits. macOS allows
+    /// overwriting a running executable as long as we do it via `mv`,
+    /// so we can self-update without an external helper script.
+    func performUpdate(from urlString: String) {
+        let binaryPath = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        let tempPath = "/tmp/claude-usage-bar.new.\(UUID().uuidString)"
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let curl = Process()
+            curl.launchPath = "/usr/bin/curl"
+            curl.arguments = ["-fsSL", urlString, "-o", tempPath]
+            try? curl.run()
+            curl.waitUntilExit()
+            if curl.terminationStatus != 0 {
+                DispatchQueue.main.async {
+                    self.showInfo(title: "Update failed", message: "curl exited \(curl.terminationStatus). Download did not complete.")
+                }
+                return
+            }
+            // chmod +x
+            let chmod = Process()
+            chmod.launchPath = "/bin/chmod"
+            chmod.arguments = ["+x", tempPath]
+            try? chmod.run()
+            chmod.waitUntilExit()
+            // mv over current binary
+            let mv = Process()
+            mv.launchPath = "/bin/mv"
+            mv.arguments = [tempPath, binaryPath]
+            try? mv.run()
+            mv.waitUntilExit()
+            if mv.terminationStatus != 0 {
+                DispatchQueue.main.async {
+                    self.showInfo(title: "Update failed",
+                                  message: "Couldn't replace \(binaryPath). Try with elevated permissions or move the install.")
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                let relaunch = Process()
+                relaunch.launchPath = binaryPath
+                try? relaunch.run()
+                // Give the new instance a moment to register its status item
+                // before this one tears down its own.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    NSApp.terminate(nil)
+                }
+            }
+        }
+    }
+
+    func showInfo(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
+    // ── alert / interval persistence ────────────────────────────────────
 
     func saveAlertConfig() {
         let obj: [String: Any] = [
@@ -512,6 +725,42 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         return m
     }
+    /// Badge for Anthropic service-status degradations (statuspage indicator).
+    /// Color map matches the upstream "minor/major/critical" semantics.
+    func serviceStatusBadge(indicator: String, description: String) -> NSAttributedString {
+        let color: NSColor
+        switch indicator {
+        case "minor":    color = .systemYellow
+        case "major":    color = .systemOrange
+        case "critical": color = .systemRed
+        default:         color = .systemYellow
+        }
+        return coloredText("⚠ Anthropic: \(description)\n", color: color)
+    }
+
+    /// "pace  87% projected at reset" line, colored by projected value.
+    /// The 5h window is 300 minutes long; elapsed = 300 - mins-until-reset.
+    func paceLine(currentPct: Double, minutesUntilReset: Int) -> NSAttributedString? {
+        let elapsed = 300 - minutesUntilReset
+        guard elapsed > 0 else { return nil }
+        let projected = currentPct / Double(elapsed) * 300.0
+        let clamped = min(projected, 999)
+        let arrow = projected <= 100 ? "→" : "⚠"
+        let summary: String
+        if projected > 100 {
+            // estimate minutes until 100% at current rate
+            let minutesTo100 = currentPct < 100
+                ? Int(Double(elapsed) * (100 - currentPct) / currentPct)
+                : 0
+            summary = String(format: "   pace      %@ %.0f%% at reset (hits 100%% in %dm)",
+                             arrow, clamped, minutesTo100)
+        } else {
+            summary = String(format: "   pace      %@ %.0f%% projected at reset",
+                             arrow, clamped)
+        }
+        return coloredText(summary, color: barColor(clamped))
+    }
+
     func appendBucketLine(_ out: NSMutableAttributedString, label: String, b: [String: Any]) {
         let pct = b["utilization"] as? Double ?? 0
         let resetIso = b["resets_at"] as? String ?? ""
