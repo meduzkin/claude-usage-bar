@@ -1,3 +1,4 @@
 *.dSYM/
+claude-usage-bar
 claude-usage-bar.arm64
 claude-usage-bar.x86_64

@@ -35,25 +35,31 @@ cd claude-usage-bar
 
 That:
 
-1. Checks prerequisites (`python3`, `npx`/`ccusage`, and `swiftc` only if a rebuild is needed) and exits with a clear error if anything is missing.
+1. Checks prerequisites (`python3`, `jq`, `npx`/`ccusage`, plus `curl` or `swiftc` depending on path) and exits with a clear error if anything is missing.
 2. Triggers the macOS keychain prompt so you can click **Always Allow** during install rather than at first widget launch.
-3. Uses the committed pre-built universal binary (arm64 + x86_64) unless `main.swift` is newer or you pass `--build`. So most installs skip the Swift toolchain entirely.
+3. Gets the binary one of two ways:
+   - **`swiftc` available** (Xcode Command Line Tools installed) → builds a universal binary from source.
+   - **`swiftc` not available** → downloads the pre-built universal binary from this repo's [latest GitHub Release](https://github.com/meduzkin/claude-usage-bar/releases/latest).
 4. Optionally registers a LaunchAgent at `~/Library/LaunchAgents/com.local.claude-usage-bar.plist` so the widget starts at login.
 
 Flags:
 
 - `./install.sh --autostart` — non-interactive, installs the LaunchAgent without prompting.
-- `./install.sh --build` — force a fresh build even if the pre-built binary is up to date.
+- `./install.sh --build` — force build from source (requires `swiftc`).
+- `./install.sh --download` — skip building, always pull the release artifact.
 
 To remove: `./uninstall.sh` (stops the widget and removes the LaunchAgent; the binary and keychain ACL stay).
 
 ## Requirements
 
 - macOS (uses Cocoa / `NSStatusItem`)
-- An active Claude Code login on this Mac — that's what creates the `Claude Code-credentials` keychain entry the widget reads
+- An active Claude Code login on this Mac — creates the `Claude Code-credentials` keychain entry the widget reads
 - `python3` on `PATH` (parses keychain JSON and merges ccusage output)
+- `jq` on `PATH` (used by the notification hook scripts)
 - `node` / `npx` on `PATH` (for [`ccusage`](https://www.npmjs.com/package/ccusage); a globally installed `ccusage` is preferred and faster)
-- Swift toolchain (`xcode-select --install`) — **only** if you intend to rebuild from source; the repo ships a pre-built universal binary
+- One of:
+  - **Swift toolchain** (`xcode-select --install`) — for `install.sh` to build from source. About 1 GB on disk; the install itself takes a couple of seconds after the toolchain is in place.
+  - **`curl`** — for `install.sh` to download the pre-built universal binary from the [latest GitHub Release](https://github.com/meduzkin/claude-usage-bar/releases/latest). No Xcode needed.
 
 ## How auth works
 

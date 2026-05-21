@@ -186,12 +186,12 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             title.append(plain("session "))
             title.append(makeBar(pct: pct, width: 6))
             title.append(coloredText(String(format: " %.0f%%", pct), color: barColor(pct)))
-            title.append(plain(String(format: " · %dm", m)))
+            title.append(plain(" · " + formatResetMinutes(m)))
             statusItem.button?.attributedTitle = title
         } else if let a = active {
             let cost = a["costUSD"] as? Double ?? 0
             let remMin = (a["projection"] as? [String: Any])?["remainingMinutes"] as? Int ?? 0
-            statusItem.button?.title = String(format: "$%.2f · %dm", cost, remMin)
+            statusItem.button?.title = String(format: "$%.2f · ", cost) + formatResetMinutes(remMin)
         } else {
             statusItem.button?.title = "claude —"
         }
@@ -539,6 +539,13 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func formatLocalTime(iso: String) -> String? {
         guard let d = Self.isoIn.date(from: iso) ?? ISO8601DateFormatter().date(from: iso) else { return nil }
         let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: d)
+    }
+
+    /// Human-friendly "Xh YYm" / "Nm" for reset countdown. Used in the
+    /// status bar title to keep it readable when the window has hours left.
+    func formatResetMinutes(_ m: Int) -> String {
+        if m < 60 { return "\(m)m" }
+        return String(format: "%dh %02dm", m / 60, m % 60)
     }
 
     func minutesUntil(iso: String) -> Int? {
