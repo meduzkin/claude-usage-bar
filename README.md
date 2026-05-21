@@ -17,10 +17,13 @@ The menu bar title reads `session 37% · 87m` — **37%** of your current 5-hour
 - **5h block** — cost, tokens, projected total, burn rate, reset time (from ccusage).
 - **last session** — most recent session cost, tokens, last activity.
 - **daily ▸** / **weekly ▸** — submenus with the last 7 days / 4 weeks of cost & token totals.
-- **notifications ▸** — toggle macOS popup + sound + terminal-activate when Claude Code waits on a permission prompt longer than N seconds. Delay options: 30s / 60s / 120s / 300s. State is read from / written to `~/.claude/settings.json` atomically.
+- **notifications** + **delay ▸** — toggle macOS popup + sound + terminal-activate when Claude Code waits on a permission prompt longer than N seconds. Delay options: 30s / 60s / 120s / 300s. State is read from / written to `~/.claude/settings.json` atomically.
+- **alert** + **threshold ▸** — when the current 5-hour utilization first crosses a threshold (70% / 80% / 90% / 95%), the widget posts a macOS notification. Fires at most once per window — a new 5h window re-arms the alert.
 - Refresh now (⌘R), Quit (⌘Q).
 
 The notifications feature is hook-based: when enabled, three entries are added to `~/.claude/settings.json` (`Notification`, `Stop`, `PreToolUse`) pointing at scripts installed at `~/.claude/scripts/`. Toggling off removes only those three entries — any other hooks you have in `settings.json` are preserved.
+
+The usage alert is self-contained — the widget reads utilization from its regular refresh, fires `osascript` directly, and persists `{enabled, threshold, alertedWindowResetsAt}` to `~/.cache/claude-usage-bar/alert.json`.
 
 ## Install
 

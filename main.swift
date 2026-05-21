@@ -66,6 +66,13 @@ func blockTotalTokens(_ d: [String: Any]) -> Int {
 
 // Delay options offered in the notifications submenu (seconds).
 let NOTIF_DELAY_OPTIONS: [Int] = [30, 60, 120, 300]
+// Threshold options offered in the usage-alert submenu (percent).
+let ALERT_THRESHOLD_OPTIONS: [Int] = [70, 80, 90, 95]
+// Where alert config + last-fired window are persisted.
+let ALERT_CONFIG_PATH: String = {
+    let home = NSHomeDirectory()
+    return "\(home)/.cache/claude-usage-bar/alert.json"
+}()
 
 class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
@@ -78,6 +85,12 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let notifDelayItem  = NSMenuItem(title: "delay",         action: nil, keyEquivalent: "")
     var notifEnabled = false
     var notifDelay = 60
+
+    let alertToggleItem     = NSMenuItem(title: "alert",     action: nil, keyEquivalent: "")
+    let alertThresholdItem  = NSMenuItem(title: "threshold", action: nil, keyEquivalent: "")
+    var alertEnabled = false
+    var alertThreshold = 90
+    var alertedWindowResetsAt: String? = nil
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -99,9 +112,16 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(notifToggleItem)
         menu.addItem(notifDelayItem)
         menu.addItem(.separator())
+        alertToggleItem.target = self
+        alertToggleItem.action = #selector(toggleAlert)
+        menu.addItem(alertToggleItem)
+        menu.addItem(alertThresholdItem)
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Refresh now", action: #selector(refresh), keyEquivalent: "r").target = self
         menu.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "q").target = self
         statusItem.menu = menu
+
+        loadAlertConfig()
 
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: REFRESH_SECONDS, repeats: true) { [weak self] _ in
@@ -232,6 +252,112 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             notifDelay   = (n["delay"]   as? Int)  ?? 60
         }
         rebuildNotifSubmenu()
+        rebuildAlertItems()
+
+        if let pct = fiveHourPct, let resetIso = fiveHourReset {
+            checkAndFireAlert(util: pct, windowResetsAt: resetIso)
+        }
+    }
+
+    /// Rebuilds the alert toggle + threshold submenu to match current state.
+    func rebuildAlertItems() {
+        let toggleLabel = alertEnabled
+            ? "✓ alert  at \(alertThreshold)%"
+            : "  alert  off"
+        alertToggleItem.attributedTitle = plain(toggleLabel)
+
+        alertThresholdItem.attributedTitle = plain("    threshold  (\(alertThreshold)%)")
+        let sub = NSMenu()
+        for n in ALERT_THRESHOLD_OPTIONS {
+            let mi = NSMenuItem(
+                title: "",
+                action: #selector(pickAlertThreshold(_:)),
+                keyEquivalent: ""
+            )
+            mi.target = self
+            mi.tag = n
+            let marker = (alertEnabled && n == alertThreshold) ? "✓ " : "   "
+            mi.attributedTitle = plain("\(marker)\(n)%")
+            sub.addItem(mi)
+        }
+        alertThresholdItem.submenu = sub
+    }
+
+    @objc func toggleAlert() {
+        alertEnabled.toggle()
+        // When re-enabling, treat the current window as un-alerted so the
+        // user gets a fresh chance to be notified.
+        if alertEnabled { alertedWindowResetsAt = nil }
+        saveAlertConfig()
+        rebuildAlertItems()
+    }
+
+    @objc func pickAlertThreshold(_ sender: NSMenuItem) {
+        guard sender.tag > 0 else { return }
+        alertThreshold = sender.tag
+        // Picking a new threshold enables the feature and resets the
+        // already-fired marker so the new threshold takes effect immediately.
+        alertEnabled = true
+        alertedWindowResetsAt = nil
+        saveAlertConfig()
+        rebuildAlertItems()
+        // Trigger immediate refresh — current utilization may already be
+        // over the new threshold and we want the popup right away.
+        refresh()
+    }
+
+    /// Fires a macOS notification when the 5h utilization first crosses the
+    /// configured threshold. Suppresses repeats by remembering which window
+    /// (keyed by its resets_at timestamp) we've already alerted for.
+    func checkAndFireAlert(util: Double, windowResetsAt: String) {
+        guard alertEnabled else { return }
+        if util < Double(alertThreshold) { return }
+        if alertedWindowResetsAt == windowResetsAt { return }
+
+        let body = String(format: "Current 5-hour session is at %.0f%% (≥ %d%%)",
+                          util, alertThreshold)
+        sendNotification(title: "Claude usage", body: body)
+
+        alertedWindowResetsAt = windowResetsAt
+        saveAlertConfig()
+    }
+
+    /// macOS notification via osascript. Self-contained — doesn't require
+    /// Claude Code's hook infrastructure or any external script.
+    func sendNotification(title: String, body: String) {
+        let escapedBody = body.replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "display notification \"\(escapedBody)\" with title \"\(escapedTitle)\" sound name \"Glass\""
+        DispatchQueue.global(qos: .background).async {
+            let p = Process()
+            p.launchPath = "/usr/bin/osascript"
+            p.arguments = ["-e", script]
+            try? p.run()
+            p.waitUntilExit()
+        }
+    }
+
+    func loadAlertConfig() {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: ALERT_CONFIG_PATH)),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return }
+        alertEnabled         = (obj["enabled"]   as? Bool)   ?? false
+        alertThreshold       = (obj["threshold"] as? Int)    ?? 90
+        alertedWindowResetsAt = obj["alertedWindowResetsAt"] as? String
+    }
+
+    func saveAlertConfig() {
+        let obj: [String: Any] = [
+            "enabled":               alertEnabled,
+            "threshold":             alertThreshold,
+            "alertedWindowResetsAt": alertedWindowResetsAt as Any
+        ]
+        let dir = (ALERT_CONFIG_PATH as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true, attributes: nil
+        )
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]) else { return }
+        try? data.write(to: URL(fileURLWithPath: ALERT_CONFIG_PATH), options: .atomic)
     }
 
     /// Rebuilds the two notification menu items (top-level toggle + delay
