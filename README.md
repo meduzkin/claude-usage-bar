@@ -1,37 +1,45 @@
 # claude-usage-bar
 
-> Native macOS menu bar widget that surfaces Claude Code's `/usage` view at a glance — coloured progress bars for your subscription's 5-hour and 7-day rate-limit windows, plus per-session cost overlay from [`ccusage`](https://www.npmjs.com/package/ccusage).
+> macOS menu-bar widget for Claude Code. Pings you when Claude is waiting on a prompt, alerts when your 5-hour usage crosses a threshold, and keeps the rate-limit windows visible at a glance.
 
-<!-- Drop a screenshot at docs/screenshot.png — Cmd+Shift+4 around the dropdown works well. -->
 ![claude-usage-bar dropdown](docs/screenshot.png)
 
-The menu bar title reads `session 37% · 87m` — **37%** of your current 5-hour rate-limit window is consumed and the window resets in **87 minutes**. The same numbers Claude Code shows when you type `/usage` in an interactive session, except always visible.
+## Notifications
 
-## Why
+Two independent nudges, both opt-in from **ALERTS & NOTIFICATIONS** in the dropdown.
 
-`/usage` only works inside an interactive Claude Code session (`claude -p "/usage"` returns a stub). This widget calls the same backend endpoint Claude Code uses (`/api/oauth/usage`) with the OAuth token Claude Code already keeps in your macOS keychain, then layers `ccusage`'s cost estimates on top of the raw utilization percentages.
+- **Permission prompt** — when Claude Code blocks on a confirmation (`Notification` / `Stop` / `PreToolUse` hooks), pops a macOS notification, plays a sound, and re-focuses your terminal if the wait exceeds your configured delay. Delay options: 30 / 60 / 120 / 300 s. Bell turns blue when on. Toggling only touches the three hooks the widget owns in `~/.claude/settings.json` — your other hooks stay.
+- **Usage threshold** — multi-select tiers 25 / 50 / 75 / 90 / 95 %. Each enabled tier fires once per 5-hour window the first time utilization crosses it, then re-arms on the next window. Triangle turns orange when on. State at `~/.cache/claude-usage-bar/alert.json`.
 
-## What's in the dropdown
+## At a glance
 
-- **plan usage (Claude)** — colored progress bars for `current session` (5h), `current week` (7d), `current week opus`, `current week sonnet`. Green <60%, yellow 60–85%, red >85%. Colors adapt to dark/light mode.
-- **plan usage (Codex)** — same shape, fetched from OpenAI's `chatgpt.com/backend-api/wham/usage`. Only shown when `~/.codex/auth.json` exists.
-- **plan usage (Gemini)** — per-model quota buckets from Google's Code Assist API (`cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota`). Only shown when `~/.gemini/oauth_creds.json` exists.
-- **plan usage (Copilot)** — chat / completions / premium interactions from GitHub's `api.github.com/copilot_internal/user`. Token discovered from `~/.copilot/config.json`, `~/.config/gh/hosts.yml`, the macOS keychain (`gh-cli`), or `$GITHUB_TOKEN`. Only shown when a token is found.
-- **5h block** — cost, tokens, projected total, burn rate, reset time (from ccusage).
-- **last session** — most recent session cost, tokens, last activity.
-- **daily ▸** / **weekly ▸** — submenus with the last 7 days / 4 weeks of cost & token totals.
-- **notifications** + **delay ▸** — toggle macOS popup + sound + terminal-activate when Claude Code waits on a permission prompt longer than N seconds. Delay options: 30s / 60s / 120s / 300s. State is read from / written to `~/.claude/settings.json` atomically.
-- **alert** + **thresholds ▸** — multi-select threshold tiers (25 / 50 / 75 / 90 / 95). Each enabled tier posts a macOS notification the first time the 5h utilization crosses it. Independently tracked per tier — a new 5h window re-arms all of them.
-- **refresh interval ▸** — how often the widget polls `/api/oauth/usage` in the background. Options: 5 / 10 / 15 / 20 / 30 minutes (default 10). Picking a value reschedules the timer immediately and persists the choice to `~/.cache/claude-usage-bar/interval.json`. The dropdown still triggers an on-open refresh with a 30 s cooldown regardless.
-- **pace projection** — inside `plan usage`, an extra `pace` line shows the projected end-of-window utilization at the current burn rate (e.g. `→ 87% projected at reset · +$12.50 more` or `⚠ 142% at reset (hits 100% in 38m) · +$28 more`). Colour matches the projected tier. When the ccusage active block is available, the line also estimates the additional spend before reset.
-- **service status badge** — when `status.anthropic.com` reports a minor / major / critical incident, the widget surfaces it at the top of the dropdown with the upstream description. Cleared once Anthropic flips back to "All Systems Operational".
-- **Check for updates…** — menu action that hits the release source's API, compares against the embedded `WIDGET_VERSION`, and (on user confirm) downloads + atomically replaces the running binary + relaunches. Source is configurable via `~/.cache/claude-usage-bar/update.json` (written by `install.sh`); both GitHub and GitLab Releases API shapes are supported.
-- **Right-click the menu-bar icon** to trigger an immediate refresh without opening the dropdown.
-- Refresh now (⌘R), Check for updates…, Quit (⌘Q).
+Status-bar title is `[bar] NN%`. Tooltip carries the rest: `Claude · session 37% · resets in 1h 27m · week 12%`.
 
-The notifications feature is hook-based: when enabled, three entries are added to `~/.claude/settings.json` (`Notification`, `Stop`, `PreToolUse`) pointing at scripts installed at `~/.claude/scripts/`. Toggling off removes only those three entries — any other hooks you have in `settings.json` are preserved.
+Right-click the icon to refresh without opening the dropdown.
 
-The usage alert is self-contained — the widget reads utilization from its regular refresh, fires `osascript` directly, and persists `{enabled, threshold, alertedWindowResetsAt}` to `~/.cache/claude-usage-bar/alert.json`.
+## Dropdown
+
+Per-provider section (only rendered when credentials exist locally). Each bucket is a single compact row:
+
+```
+✱ Claude
+updated 16:50 · OAuth
+
+Session    ████░░░░░░░░    82.0%  ·  0h 47m
+Weekly     █░░░░░░░░░░░     9.0%  ·  6d 19h
+pace       lasts until reset  ·  +$15.71 more
+Sonnet     ░░░░░░░░░░░░     0.0%
+```
+
+- **Claude** — `Session` (5h), `Weekly` (7d), `Opus`, `Sonnet`. Green <60%, yellow 60–85%, red >85%. Adapts to dark/light mode.
+- **Codex** — from `~/.codex/auth.json`, with a JSON-RPC `via app-server` fallback when HTTP is rate-limited.
+- **Gemini** — per-model quotas from Google's Code Assist API.
+- **Copilot** — `Chat` / `Completions` / `Premium` from `api.github.com/copilot_internal/user`.
+- **pace** — projection under `Weekly`: `lasts until reset` / `lasts until reset (tight)` / `runs out in 1h 06m`, colour follows meaning. Appends `· +$X.XX more` when `ccusage` has the active block.
+- **service status** — top-of-dropdown badge when `status.anthropic.com` reports a minor / major / critical incident.
+- **details ▸ / daily ▸ / weekly ▸** — active 5h block (cost / tokens / burn) and the last 7d / 4w totals.
+- **refresh interval ▸** — 5 / 10 / 15 / 20 / 30 min (default 10). Background poll + on-open with a 30 s cooldown.
+- **Check for updates…** — self-update from GitHub or GitLab Releases (source picked at install time).
 
 ## Install
 
@@ -86,8 +94,9 @@ For headless / CI setups, set `CLAUDE_CREDS=/path/to/file` and `usage.sh` reads 
 - **`usage.sh`** — resolves the OAuth token, calls `https://api.anthropic.com/api/oauth/usage` with the `anthropic-beta: oauth-2025-04-20` header for plan utilization, runs `ccusage` (`blocks --active`, `daily`, `weekly`, `session`) for cost data, optionally calls `scripts/codex-usage.sh` to grab OpenAI Codex's rate limits (`/backend-api/wham/usage`), and merges everything into one JSON blob via inline `python3`.
 - Successful API responses are cached at `~/.cache/claude-usage-bar/oauth.json`. The endpoint rate-limits aggressively (429s within a few requests per minute), so on failure the widget falls back to the cached response — the bars stay visible even when the endpoint refuses to talk to us.
 - On a `401` `usage.sh` re-reads from keychain and retries once, in case Claude Code rotated the token.
-- **`main.swift`** — Cocoa app with `NSStatusItem`, refreshes every `refresh interval` minutes (user-configurable from the dropdown; default 10) **plus** every time you open the dropdown (with a 30-second cooldown to avoid spamming the rate-limited endpoint). All menu items wrap their content in custom `NSView`s with opaque backgrounds so the dropdown reads more solidly than the default vibrancy material.
-- **`build.sh`** — produces a universal binary (`swiftc` + `lipo` over arm64 and x86_64 slices).
+- **`main.swift`** — Cocoa app with `NSStatusItem`, refreshes every `refresh interval` minutes (user-configurable from the dropdown; default 10) **plus** every time you open the dropdown (with a 30-second cooldown to avoid spamming the rate-limited endpoint). Each row in the data section is wrapped in a custom `NSView` with an opaque background so the dropdown reads more solidly than the default vibrancy material.
+- **`build.sh`** — produces a universal binary (`swiftc` + `lipo` over arm64 and x86_64 slices, target `macos12`).
+- **Single-instance guard** — on launch the GUI process acquires a BSD `flock(LOCK_EX | LOCK_NB)` on `~/.cache/claude-usage-bar/widget.lock`. A second launch (LaunchAgent + manual run, a self-update that didn't terminate the prior process, a Finder double-click) sees the lock and exits cleanly. The kernel auto-releases on process death, so stale lock files never wedge future launches. `--headless` bypasses the lock.
 
 ## Claude Code statusline
 
