@@ -114,6 +114,20 @@ echo "==> hook + statusline scripts deployed to $SCRIPTS_TARGET/"
 echo "    enable notifications from the menu bar dropdown"
 echo "    add statusline.sh to Claude Code: set \"statusline\": {\"command\": \"$SCRIPTS_TARGET/statusline.sh\"} in ~/.claude/settings.json"
 
+# Self-update source config. The widget reads this to know where to
+# check for new releases. The GitHub distribution writes the GitHub
+# Releases API endpoint here; the ai-snippets distribution writes the
+# GitLab Releases API endpoint.
+mkdir -p "$HOME/.cache/claude-usage-bar"
+cat > "$HOME/.cache/claude-usage-bar/update.json" <<EOF
+{
+  "type":       "github",
+  "url":        "https://api.github.com/repos/meduzkin/claude-usage-bar/releases/latest",
+  "asset_name": "claude-usage-bar"
+}
+EOF
+echo "==> update source pinned to GitHub Releases"
+
 if [ "$autostart" -eq 0 ]; then
   printf "\nInstall LaunchAgent so the widget starts at login? [y/N] "
   read -r ans

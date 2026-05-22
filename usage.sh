@@ -114,6 +114,26 @@ session=$($CC session       --json 2>/dev/null   || echo '{"session":[],"totals"
 # local file, no I/O over the network.
 notif=$("$(dirname "$0")/notif.sh" state 2>/dev/null || echo '{"enabled":false,"delay":60}')
 
+# Codex usage (OpenAI). Best-effort — returns {} if user doesn't have
+# Codex installed / authenticated. The script ships in scripts/.
+codex=$("$(dirname "$0")/scripts/codex-usage.sh" 2>/dev/null || echo '{}')
+# Fallback when running with a different layout (e.g. scripts/ next to usage.sh)
+if [ "$codex" = "{}" ] && [ -x "$(dirname "$0")/codex-usage.sh" ]; then
+  codex=$("$(dirname "$0")/codex-usage.sh" 2>/dev/null || echo '{}')
+fi
+
+# Gemini Code Assist usage (Google). Same best-effort pattern.
+gemini=$("$(dirname "$0")/scripts/gemini-usage.sh" 2>/dev/null || echo '{}')
+if [ "$gemini" = "{}" ] && [ -x "$(dirname "$0")/gemini-usage.sh" ]; then
+  gemini=$("$(dirname "$0")/gemini-usage.sh" 2>/dev/null || echo '{}')
+fi
+
+# GitHub Copilot usage. Same best-effort pattern.
+copilot=$("$(dirname "$0")/scripts/copilot-usage.sh" 2>/dev/null || echo '{}')
+if [ "$copilot" = "{}" ] && [ -x "$(dirname "$0")/copilot-usage.sh" ]; then
+  copilot=$("$(dirname "$0")/copilot-usage.sh" 2>/dev/null || echo '{}')
+fi
+
 # Anthropic service status from their public Statuspage. Same widget poll
 # cadence as the oauth endpoint — and it's cached at one level lower
 # (Statuspage CDN) so we don't have to worry about rate limits here.
@@ -133,9 +153,9 @@ print(json.dumps(out))
 PY
 )
 
-python3 - "$oauth" "$blocks" "$daily" "$weekly" "$session" "$notif" "$service_status" <<'PY'
+python3 - "$oauth" "$blocks" "$daily" "$weekly" "$session" "$notif" "$service_status" "$codex" "$gemini" "$copilot" <<'PY'
 import json, sys
-ou, b, d, w, s, n, svc = (json.loads(x) for x in sys.argv[1:8])
+ou, b, d, w, s, n, svc, cx, gm, cp = (json.loads(x) for x in sys.argv[1:11])
 sessions = s.get("session") or []
 def last_activity(x):
     return (x.get("metadata") or {}).get("lastActivity") or ""
@@ -148,6 +168,9 @@ out = {
     "session": sessions_sorted[-1] if sessions_sorted else None,
     "notif":   n,
     "service": svc,
+    "codex":   cx if cx else None,
+    "gemini":  gm if gm else None,
+    "copilot": cp if cp else None,
 }
 print(json.dumps(out))
 PY
