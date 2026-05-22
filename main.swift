@@ -87,7 +87,7 @@ func blockTotalTokens(_ d: [String: Any]) -> Int {
 
 // Widget version, bumped manually each release. Compared against the
 // `tag_name` of the latest release fetched from the configured source.
-let WIDGET_VERSION = "0.5.0"
+let WIDGET_VERSION = "0.5.1"
 // Default update source. Overridable at runtime by ~/.cache/claude-usage-bar/update.json
 // — install.sh writes that file pointing at the distribution it came from
 // (GitHub Releases for the standalone repo, GitLab Releases for the
@@ -1214,17 +1214,18 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return m
     }
 
-    /// "Xh YYm" for short windows, "Xd Yh" once the remaining time crosses
-    /// a day — keeps the right-aligned reset countdown compact.
+    /// "Xh YYm" for short windows, "Xd YYh" once the remaining time
+    /// crosses a day. Lead value padded to 2 chars so the column reads
+    /// as a flush right-edge across rows ("0h 47m" / " 6d 19h").
     func formatResetLong(_ minutes: Int) -> String {
         if minutes >= 60 * 24 {
             let d = minutes / (60 * 24)
             let h = (minutes % (60 * 24)) / 60
-            return "\(d)d \(h)h"
+            return String(format: "%2dd %02dh", d, h)
         }
         let h = minutes / 60
         let m = minutes % 60
-        return String(format: "%dh %02dm", h, m)
+        return String(format: "%2dh %02dm", h, m)
     }
 
     /// Legacy thin header used in setDetail's pre-data placeholder paths.
@@ -1272,7 +1273,9 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // drawn pill, matches the original widget look.
         out.append(makeBar(pct: pct, width: 12))
         out.append(NSAttributedString(
-            string: String(format: "  %.1f%%", pct),
+            // %5.1f gives a fixed 5-char number column (" 9.0", "81.0", "100.0")
+            // so the `·` and reset time below align across rows.
+            string: String(format: "  %5.1f%%", pct),
             attributes: [.font: Self.monoSub, .foregroundColor: barColor(pct)]
         ))
         if showReset, let m = minutesUntil(iso: resetIso), m > 0 {
@@ -1443,6 +1446,38 @@ func runHeadless(asJSON: Bool) {
         }
         print(parts.joined(separator: " · "))
     }
+}
+
+// Single-instance guard. Without it you can easily end up with two
+// menu-bar icons (LaunchAgent + manual launch, or a self-update that
+// fails to terminate the previous process). Acquired BSD-style via
+// `flock(LOCK_EX | LOCK_NB)` — the kernel releases the lock when the
+// holding process dies, so a stale file never wedges future launches.
+let LOCK_PATH = "\(NSHomeDirectory())/.cache/claude-usage-bar/widget.lock"
+var singletonFD: Int32 = -1   // kept alive for the lifetime of the process
+
+func acquireSingletonLock() -> Bool {
+    let dir = (LOCK_PATH as NSString).deletingLastPathComponent
+    try? FileManager.default.createDirectory(
+        atPath: dir, withIntermediateDirectories: true, attributes: nil
+    )
+    let fd = open(LOCK_PATH, O_CREAT | O_RDWR, 0o644)
+    if fd < 0 { return false }
+    if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+        close(fd)
+        return false
+    }
+    // Stash our pid for humans peeking at the lock file.
+    ftruncate(fd, 0)
+    let pid = "\(getpid())\n"
+    _ = pid.withCString { write(fd, $0, strlen($0)) }
+    singletonFD = fd
+    return true
+}
+
+if !acquireSingletonLock() {
+    fputs("claude-usage-bar: another instance is already running (lock at \(LOCK_PATH)). Exiting.\n", stderr)
+    exit(0)
 }
 
 let app = NSApplication.shared
