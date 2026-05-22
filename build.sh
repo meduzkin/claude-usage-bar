@@ -10,8 +10,8 @@ ARM="claude-usage-bar.arm64"
 X86="claude-usage-bar.x86_64"
 OUT="claude-usage-bar"
 
-swiftc -O -target arm64-apple-macos11   main.swift -o "$ARM"
-swiftc -O -target x86_64-apple-macos11 main.swift -o "$X86"
+swiftc -O -target arm64-apple-macos12  main.swift -o "$ARM"
+swiftc -O -target x86_64-apple-macos12 main.swift -o "$X86"
 lipo -create -output "$OUT" "$ARM" "$X86"
 rm -f "$ARM" "$X86"
 

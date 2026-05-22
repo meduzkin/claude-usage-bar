@@ -27,6 +27,24 @@ let DEFAULT_INTERVAL_MINUTES: Int = 10
 let ON_OPEN_COOLDOWN: TimeInterval = 30
 let INTERVAL_CONFIG_PATH: String = "\(NSHomeDirectory())/.cache/claude-usage-bar/interval.json"
 
+/// Brand-ish colours for each provider's bullet glyph. Used as the
+/// "icon" in dropdown section headers — gives the eye a quick scan
+/// without committing to actual logo images.
+let PROVIDER_COLORS: [String: NSColor] = [
+    "claude":  NSColor(srgbRed: 0.85, green: 0.46, blue: 0.34, alpha: 1.0),  // Anthropic warm
+    "codex":   NSColor(srgbRed: 0.06, green: 0.64, blue: 0.49, alpha: 1.0),  // OpenAI green
+    "gemini":  NSColor(srgbRed: 0.26, green: 0.52, blue: 0.96, alpha: 1.0),  // Google blue
+    "copilot": NSColor(srgbRed: 0.55, green: 0.41, blue: 1.00, alpha: 1.0),  // Copilot purple
+]
+
+/// Pace projection is hidden when less than this fraction of the 5h
+/// window has elapsed — projections from <3% sample are noise.
+let PACE_MIN_ELAPSED_FRACTION: Double = 0.03
+
+/// Fixed content width for the dropdown body — drives bar width and the
+/// right-alignment of two-column rows like "X% used … Resets in Yh Zm".
+let CONTENT_WIDTH: CGFloat = 280
+
 func shortModel(_ raw: String) -> String {
     // claude-opus-4-7 -> opus-4.7
     // claude-haiku-4-5-20251001 -> haiku-4.5
@@ -68,7 +86,7 @@ func blockTotalTokens(_ d: [String: Any]) -> Int {
 
 // Widget version, bumped manually each release. Compared against the
 // `tag_name` of the latest release fetched from the configured source.
-let WIDGET_VERSION = "0.3.0"
+let WIDGET_VERSION = "0.4.0"
 // Default update source. Overridable at runtime by ~/.cache/claude-usage-bar/update.json
 // — install.sh writes that file pointing at the distribution it came from
 // (GitHub Releases for the standalone repo, GitLab Releases for the
@@ -96,9 +114,11 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var timer: Timer?
     var lastRefreshAt: Date = .distantPast
-    let detailItem = NSMenuItem(title: "Loading…", action: nil, keyEquivalent: "")
-    let dailyItem  = NSMenuItem(title: "daily",  action: nil, keyEquivalent: "")
-    let weeklyItem = NSMenuItem(title: "weekly", action: nil, keyEquivalent: "")
+    var lastSuccessfulRefreshAt: Date = .distantPast
+    let detailItem  = NSMenuItem(title: "Loading…", action: nil, keyEquivalent: "")
+    let detailsSubItem = NSMenuItem(title: "details", action: nil, keyEquivalent: "")
+    let dailyItem   = NSMenuItem(title: "daily",  action: nil, keyEquivalent: "")
+    let weeklyItem  = NSMenuItem(title: "weekly", action: nil, keyEquivalent: "")
     let notifToggleItem = NSMenuItem(title: "notifications", action: nil, keyEquivalent: "")
     let notifDelayItem  = NSMenuItem(title: "delay",         action: nil, keyEquivalent: "")
     var notifEnabled = false
@@ -134,8 +154,10 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setDetail(plain("Loading…"))
         menu.addItem(detailItem)
         menu.addItem(.separator())
+        detailsSubItem.isHidden = true
         dailyItem.isHidden = true
         weeklyItem.isHidden = true
+        menu.addItem(detailsSubItem)
         menu.addItem(dailyItem)
         menu.addItem(weeklyItem)
         menu.addItem(.separator())
@@ -151,12 +173,22 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(intervalItem)
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Refresh now", action: #selector(refresh), keyEquivalent: "r").target = self
-        menu.addItem(withTitle: "Check for updates…", action: #selector(checkForUpdates), keyEquivalent: "").target = self
+        let refreshMI = menu.addItem(withTitle: "Refresh now", action: #selector(refresh), keyEquivalent: "r")
+        refreshMI.target = self
+        refreshMI.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
+
+        let updateMI = menu.addItem(withTitle: "Check for updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        updateMI.target = self
+        updateMI.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+
         let aboutItem = NSMenuItem(title: "version \(WIDGET_VERSION)", action: nil, keyEquivalent: "")
         aboutItem.isEnabled = false
+        aboutItem.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil)
         menu.addItem(aboutItem)
-        menu.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "q").target = self
+
+        let quitMI = menu.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "q")
+        quitMI.target = self
+        quitMI.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
 
         loadAlertConfig()
         loadIntervalConfig()
@@ -248,20 +280,41 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let fiveHourReset = fiveHour?["resets_at"] as? String
         let fiveHourResetMin = minutesUntil(iso: fiveHourReset ?? "")
 
-        // ── status bar title (mini colored bar) ─────────────────────────
-        if let pct = fiveHourPct, let m = fiveHourResetMin {
-            let title = NSMutableAttributedString()
-            title.append(plain("session "))
-            title.append(makeBar(pct: pct, width: 6))
-            title.append(coloredText(String(format: " %.0f%%", pct), color: barColor(pct)))
-            title.append(plain(" · " + formatResetMinutes(m)))
-            statusItem.button?.attributedTitle = title
+        // Track freshness — used to dim the status bar title when refresh
+        // pipeline has been silently failing.
+        if fiveHourPct != nil {
+            lastSuccessfulRefreshAt = Date()
+        }
+
+        // ── status bar title: compact glance ────────────────────────────
+        //   [████░░] 32%      ← always visible
+        // Full info moves to the tooltip; the dropdown holds the detail.
+        let isStale = lastSuccessfulRefreshAt != .distantPast &&
+                      Date().timeIntervalSince(lastSuccessfulRefreshAt) >
+                        Double(refreshIntervalMinutes * 60) * 2.5
+        let titleStr = NSMutableAttributedString()
+        if let pct = fiveHourPct {
+            titleStr.append(makeBar(pct: pct, width: 8))
+            let pctColor = isStale ? NSColor.tertiaryLabelColor : barColor(pct)
+            titleStr.append(coloredText(String(format: " %.0f%%", pct), color: pctColor))
+            statusItem.button?.attributedTitle = titleStr
+
+            // Tooltip carries the parts we stripped from the title
+            var tip = String(format: "Claude · session %.0f%%", pct)
+            if let m = fiveHourResetMin { tip += " · resets in \(formatResetMinutes(m))" }
+            if let sd = sevenDay, let weekPct = sd["utilization"] as? Double {
+                tip += String(format: " · week %.0f%%", weekPct)
+            }
+            if isStale { tip += " · (data stale)" }
+            statusItem.button?.toolTip = tip
         } else if let a = active {
             let cost = a["costUSD"] as? Double ?? 0
             let remMin = (a["projection"] as? [String: Any])?["remainingMinutes"] as? Int ?? 0
             statusItem.button?.title = String(format: "$%.2f · ", cost) + formatResetMinutes(remMin)
+            statusItem.button?.toolTip = "no oauth data — showing ccusage block cost"
         } else {
             statusItem.button?.title = "claude —"
+            statusItem.button?.toolTip = "no data — open dropdown to refresh"
         }
 
         // ── dropdown body ───────────────────────────────────────────────
@@ -276,87 +329,129 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             out.append(plain("\n"))
         }
 
-        if fiveHour != nil || sevenDay != nil {
-            out.append(plain("◆ plan usage  (Claude)\n"))
-            if let f = fiveHour { appendBucketLine(out, label: "current session       ", b: f) }
-            if let s = sevenDay { appendBucketLine(out, label: "current week          ", b: s) }
-            if let o = oauth["seven_day_opus"]   as? [String: Any] { appendBucketLine(out, label: "current week opus     ", b: o) }
-            if let s = oauth["seven_day_sonnet"] as? [String: Any] { appendBucketLine(out, label: "current week sonnet   ", b: s) }
-
-            // Pace marker: projected end-of-window utilization at current burn,
-            // plus projected additional cost when ccusage gave us numbers.
-            if let pct = fiveHourPct, let mins = fiveHourResetMin {
-                if let line = paceLine(currentPct: pct, minutesUntilReset: mins,
-                                       activeBlock: active) {
-                    out.append(line)
-                    out.append(plain("\n"))
-                }
+        // Tracks whether we already emitted a section, so we can drop a
+        // separator before each subsequent one.
+        var emittedSection = false
+        func sectionSpacer() {
+            if emittedSection {
+                out.append(separatorLine())
+                out.append(plainSized("\n\n", font: Self.subFont))
             }
-            out.append(plain("\n"))
+            emittedSection = true
+        }
+        let nl = { (font: NSFont) in self.plainSized("\n", font: font) }
+
+        /// Single-line muted subtitle under the section header. No tab-stops
+        /// — avoids the right-aligned wrap bug.
+        func subtitleLine(_ parts: [String], _ extra: NSAttributedString? = nil) {
+            let s = parts.joined(separator: "  ·  ")
+            out.append(plainSized(s, font: Self.subFont, color: .secondaryLabelColor))
+            if let extra { out.append(extra) }
+            out.append(nl(Self.subFont))
+            out.append(nl(Self.subFont))
         }
 
-        // Codex section — only rendered when the user has an authenticated
-        // OpenAI Codex CLI install (scripts/codex-usage.sh returned data).
+        if fiveHour != nil || sevenDay != nil {
+            sectionSpacer()
+            out.append(sectionHeader("Claude", key: "claude"))
+            out.append(nl(Self.headerFont))
+            subtitleLine(["updated " + Self.timeFmt.string(from: Date()), "OAuth"])
+
+            if let f = fiveHour { appendBucketBlock(out, label: "Session", b: f) }
+            if let s = sevenDay { appendBucketBlock(out, label: "Weekly",  b: s) }
+            // Pace narrative sits under Weekly.
+            if let pct = fiveHourPct, let mins = fiveHourResetMin {
+                if let line = paceNarrativeLine(currentPct: pct, minutesUntilReset: mins,
+                                                activeBlock: active) {
+                    out.append(line)
+                    out.append(nl(Self.paceFont))
+                    out.append(nl(Self.subFont))
+                }
+            }
+            if let o = oauth["seven_day_opus"]   as? [String: Any] {
+                appendBucketBlock(out, label: "Opus", b: o)
+            }
+            if let s = oauth["seven_day_sonnet"] as? [String: Any] {
+                appendBucketBlock(out, label: "Sonnet", b: s)
+            }
+        }
+
+        // Codex section — only when the user has an authenticated OpenAI Codex CLI install.
         if let codex = payload["codex"] as? [String: Any], !codex.isEmpty {
-            let cx5  = codex["five_hour"]  as? [String: Any]
-            let cx7  = codex["seven_day"] as? [String: Any]
+            let cx5 = codex["five_hour"] as? [String: Any]
+            let cx7 = codex["seven_day"] as? [String: Any]
             if cx5 != nil || cx7 != nil {
-                var header = "◆ plan usage  (Codex"
+                sectionSpacer()
+                out.append(sectionHeader("Codex", key: "codex"))
+                out.append(nl(Self.headerFont))
+                var parts = ["updated " + Self.timeFmt.string(from: Date())]
                 if let src = codex["source"] as? String, src == "rpc" {
-                    header += " · via app-server"
+                    parts.append("via app-server")
                 }
-                header += ")"
-                if (codex["stale"] as? Bool) == true {
-                    out.append(plain(header + "  "))
-                    out.append(coloredText("(token stale — run `codex` to refresh)",
-                                            color: .systemYellow))
-                    out.append(plain("\n"))
+                let stale = (codex["stale"] as? Bool) == true
+                if stale {
+                    let extra = plainSized("  ·  token stale", font: Self.subFont, color: .systemYellow)
+                    subtitleLine(parts, extra)
                 } else {
-                    out.append(plain(header + "\n"))
+                    parts.append("OAuth")
+                    subtitleLine(parts)
                 }
-                if let f = cx5 { appendBucketLine(out, label: "current session       ", b: f) }
-                if let s = cx7 { appendBucketLine(out, label: "current week          ", b: s) }
-                out.append(plain("\n"))
+                if let f = cx5 { appendBucketBlock(out, label: "Session", b: f) }
+                if let s = cx7 { appendBucketBlock(out, label: "Weekly",  b: s) }
             }
         }
 
         // Gemini Code Assist — per-model quota buckets.
         if let gemini = payload["gemini"] as? [String: Any],
            let models = gemini["models"] as? [[String: Any]], !models.isEmpty {
-            out.append(plain("◆ plan usage  (Gemini)\n"))
+            sectionSpacer()
+            out.append(sectionHeader("Gemini", key: "gemini"))
+            out.append(nl(Self.headerFont))
+            subtitleLine(["updated " + Self.timeFmt.string(from: Date()), "Code Assist"])
             for m in models {
                 let name = (m["name"] as? String) ?? "model"
                 let bucket: [String: Any] = [
                     "utilization": m["utilization"] ?? 0,
                     "resets_at":   m["resets_at"]   ?? "",
                 ]
-                let label = name.padding(toLength: 22, withPad: " ", startingAt: 0)
-                appendBucketLine(out, label: label, b: bucket)
+                appendBucketBlock(out, label: name, b: bucket)
             }
-            out.append(plain("\n"))
         }
 
         // GitHub Copilot — chat / completions / premium quotas.
         if let copilot = payload["copilot"] as? [String: Any], !copilot.isEmpty {
-            var anyRendered = false
-            for (label, key) in [("chat                  ", "chat"),
-                                  ("completions           ", "completions"),
-                                  ("premium interactions  ", "premium")] {
-                if let b = copilot[key] as? [String: Any] {
-                    if !anyRendered {
-                        out.append(plain("◆ plan usage  (Copilot)\n"))
-                        anyRendered = true
-                    }
+            let entries: [(String, String)] = [
+                ("Chat", "chat"),
+                ("Completions", "completions"),
+                ("Premium interactions", "premium"),
+            ]
+            let buckets = entries.compactMap { tup -> (String, [String: Any])? in
+                guard let b = copilot[tup.1] as? [String: Any] else { return nil }
+                return (tup.0, b)
+            }
+            if !buckets.isEmpty {
+                sectionSpacer()
+                out.append(sectionHeader("Copilot", key: "copilot"))
+                out.append(nl(Self.headerFont))
+                subtitleLine(["updated " + Self.timeFmt.string(from: Date()), "GitHub"])
+                for (label, b) in buckets {
                     if (b["unlimited"] as? Bool) == true {
-                        out.append(plain("   \(label)  unlimited\n"))
+                        out.append(metricHeader(label))
+                        out.append(nl(Self.metricFont))
+                        out.append(plainSized("unlimited", font: Self.monoSub,
+                                              color: .secondaryLabelColor))
+                        out.append(nl(Self.monoSub))
+                        out.append(nl(Self.monoSub))
                     } else {
-                        appendBucketLine(out, label: label, b: b)
+                        appendBucketBlock(out, label: label, b: b)
                     }
                 }
             }
-            if anyRendered { out.append(plain("\n")) }
         }
 
+        // 5h block + last session move into the `details ▸` submenu — keeps
+        // the main dropdown focused on the headline (provider bars + pace).
+        let detailsOut = NSMutableAttributedString()
         if let a = active {
             let cost = a["costUSD"] as? Double ?? 0
             let proj = (a["projection"] as? [String: Any])?["totalCost"] as? Double ?? 0
@@ -367,16 +462,16 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let models = (a["models"] as? [String]) ?? []
             let tokens = blockTotalTokens(a)
 
-            out.append(plain("◆ 5h block · " + (models.isEmpty ? "—" : shortModels(models)) + "\n"))
-            out.append(plain(String(format: "   spent      $%.2f\n", cost)))
-            out.append(plain(String(format: "   tokens     %@\n", fmtTokens(tokens))))
-            out.append(plain(String(format: "   projected  $%.2f\n", proj)))
-            out.append(plain(String(format: "   burn       $%.2f/h  %@/min\n", burn, fmtTokens(Int(tpm)))))
+            detailsOut.append(plain("◆ 5h block · " + (models.isEmpty ? "—" : shortModels(models)) + "\n"))
+            detailsOut.append(plain(String(format: "   spent      $%.2f\n", cost)))
+            detailsOut.append(plain(String(format: "   tokens     %@\n", fmtTokens(tokens))))
+            detailsOut.append(plain(String(format: "   projected  $%.2f\n", proj)))
+            detailsOut.append(plain(String(format: "   burn       $%.2f/h  %@/min\n", burn, fmtTokens(Int(tpm)))))
             var resets = String(format: "   resets in  %dh %02dm", remMin / 60, remMin % 60)
             if let local = formatLocalTime(iso: endTime) { resets += " at \(local)" }
-            out.append(plain(resets + "\n"))
+            detailsOut.append(plain(resets + "\n"))
         } else {
-            out.append(plain("◆ 5h block\n   (no active block — run something in Claude Code)\n"))
+            detailsOut.append(plain("◆ 5h block\n   (no active block — run something in Claude Code)\n"))
         }
 
         if let s = session {
@@ -384,14 +479,16 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let tokens = sumTokens(s)
             let models = (s["modelsUsed"] as? [String]) ?? []
             let last = ((s["metadata"] as? [String: Any])?["lastActivity"] as? String) ?? ""
-            out.append(plain("\n◆ last session · " + (models.isEmpty ? "—" : shortModels(models)) + "\n"))
-            out.append(plain(String(format: "   spent      $%.2f\n", cost)))
-            out.append(plain(String(format: "   tokens     %@\n", fmtTokens(tokens))))
-            out.append(plain("   activity   \(last)\n"))
+            detailsOut.append(plain("\n◆ last session · " + (models.isEmpty ? "—" : shortModels(models)) + "\n"))
+            detailsOut.append(plain(String(format: "   spent      $%.2f\n", cost)))
+            detailsOut.append(plain(String(format: "   tokens     %@\n", fmtTokens(tokens))))
+            detailsOut.append(plain("   activity   \(last)\n"))
         }
 
-        out.append(plain("\nUpdated: " + Self.timeFmt.string(from: Date())))
+        // No trailing footer — each section already carries its own
+        // "Updated HH:MM" subtitle.
         setDetail(out)
+        populateDetailsSubmenu(detailsOut)
 
         populateHistorySubmenu(item: dailyItem, label: "daily",  rows: daily)
         populateHistorySubmenu(item: weeklyItem, label: "weekly", rows: weekly)
@@ -413,14 +510,21 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let toggleLabel: String
         if alertEnabled && !alertThresholds.isEmpty {
             let tiers = alertThresholds.sorted().map { "\($0)" }.joined(separator: "/")
-            toggleLabel = "✓ alert  at \(tiers)%"
+            toggleLabel = "alert · on · \(tiers)%"
         } else {
-            toggleLabel = "  alert  off"
+            toggleLabel = "alert · off"
         }
         alertToggleItem.attributedTitle = plain(toggleLabel)
+        // Outlined + dimmed triangle when off so the warn glyph doesn't
+        // demand attention for a feature that's intentionally disabled.
+        alertToggleItem.image = tintedSymbol(
+            name: alertEnabled ? "exclamationmark.triangle.fill" : "exclamationmark.triangle",
+            color: alertEnabled ? nil : NSColor.tertiaryLabelColor
+        )
 
         let tiersStr = alertThresholds.sorted().map(String.init).joined(separator: "/")
-        alertThresholdItem.attributedTitle = plain("    thresholds  (\(tiersStr.isEmpty ? "—" : tiersStr + "%"))")
+        alertThresholdItem.attributedTitle = plain("thresholds  (\(tiersStr.isEmpty ? "—" : tiersStr + "%"))")
+        alertThresholdItem.image = NSImage(systemSymbolName: "gauge.medium", accessibilityDescription: nil)
         let sub = NSMenu()
         for n in ALERT_THRESHOLD_OPTIONS {
             let mi = NSMenuItem(
@@ -505,6 +609,7 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Rebuilds the refresh-interval parent label + its submenu of choices.
     func rebuildIntervalSubmenu() {
         intervalItem.attributedTitle = plain("refresh interval  (\(refreshIntervalMinutes)m)")
+        intervalItem.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: nil)
         let sub = NSMenu()
         for m in INTERVAL_OPTIONS {
             let mi = NSMenuItem(
@@ -745,11 +850,16 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// after the next poll.
     func rebuildNotifSubmenu() {
         let toggleLabel = notifEnabled
-            ? "✓ notifications  on \(notifDelay)s"
-            : "  notifications  off"
+            ? "notifications · on · \(notifDelay)s"
+            : "notifications · off"
         notifToggleItem.attributedTitle = plain(toggleLabel)
+        notifToggleItem.image = tintedSymbol(
+            name: notifEnabled ? "bell.fill" : "bell.slash",
+            color: notifEnabled ? nil : NSColor.tertiaryLabelColor
+        )
 
-        notifDelayItem.attributedTitle = plain("    delay  (\(notifDelay)s)")
+        notifDelayItem.attributedTitle = plain("delay  (\(notifDelay)s)")
+        notifDelayItem.image = NSImage(systemSymbolName: "clock", accessibilityDescription: nil)
         let sub = NSMenu()
         for n in NOTIF_DELAY_OPTIONS {
             let mi = NSMenuItem(
@@ -793,6 +903,24 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// Wraps the 5h-block + last-session block into the `details ▸`
+    /// parent's submenu. Hidden when there's no content to show.
+    func populateDetailsSubmenu(_ content: NSAttributedString) {
+        guard content.length > 0 else {
+            detailsSubItem.isHidden = true
+            detailsSubItem.submenu = nil
+            return
+        }
+        detailsSubItem.isHidden = false
+        detailsSubItem.view = opaqueRowView(plain("details      ▸"), hPad: 18, vPad: 4)
+        let sub = NSMenu()
+        let body = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        body.view = opaqueRowView(content, hPad: 18, vPad: 4)
+        body.isEnabled = false
+        sub.addItem(body)
+        detailsSubItem.submenu = sub
+    }
+
     func populateHistorySubmenu(item: NSMenuItem, label: String, rows: [[String: Any]]) {
         guard !rows.isEmpty else {
             item.isHidden = true
@@ -828,19 +956,32 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 attr.addAttribute(.font, value: Self.monoFont, range: range)
             }
         }
-        detailItem.view = opaqueRowView(attr, hPad: 14, vPad: 6)
+        // Use the fixed content width so right-aligned tab stops in
+        // twoColLine actually push the right column to the far edge.
+        detailItem.view = opaqueRowView(attr, hPad: 14, vPad: 8, fixedWidth: CONTENT_WIDTH)
     }
 
     /// Builds an opaque-backgrounded NSView containing the given attributed text.
-    /// Used to give menu items a solid background instead of the translucent
-    /// vibrancy macOS applies by default.
-    func opaqueRowView(_ attr: NSAttributedString, hPad: CGFloat, vPad: CGFloat) -> NSView {
+    /// When `fixedWidth` is supplied, the inner label is sized to that
+    /// width (needed for tab-stop right-alignment to land on the edge);
+    /// height is measured for that width.
+    func opaqueRowView(_ attr: NSAttributedString, hPad: CGFloat, vPad: CGFloat,
+                       fixedWidth: CGFloat? = nil) -> NSView {
         let label = NSTextField(labelWithAttributedString: attr)
         label.isBezeled = false
         label.drawsBackground = false
         label.isEditable = false
         label.isSelectable = false
-        let fit = label.fittingSize
+        label.lineBreakMode = .byWordWrapping
+        label.usesSingleLineMode = false
+        let fit: NSSize
+        if let w = fixedWidth {
+            label.preferredMaxLayoutWidth = w
+            let h = label.sizeThatFits(NSSize(width: w, height: .greatestFiniteMagnitude)).height
+            fit = NSSize(width: w, height: h)
+        } else {
+            fit = label.fittingSize
+        }
         let wrapper = OpaqueBackgroundView(frame: NSRect(
             x: 0, y: 0,
             width:  fit.width  + hPad * 2,
@@ -861,10 +1002,25 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // ── attributed-string helpers ───────────────────────────────────────
-    static let monoFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    static let monoFont    = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    /// Bold provider-name header. Slightly smaller than CodexBar's so
+    /// the screen has room without the bar widget feeling oversized.
+    static let headerFont  = NSFont.systemFont(ofSize: 15, weight: .bold)
+    /// Metric block heading: Session / Weekly / Sonnet / etc.
+    static let metricFont  = NSFont.systemFont(ofSize: 12, weight: .semibold)
+    /// Compact monospace for the inline figures under each bar — our
+    /// signature touch versus CodexBar's prose two-column layout.
+    static let monoSub     = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+    /// Section subtitle ("Updated HH:MM · OAuth").
+    static let subFont     = NSFont.systemFont(ofSize: 11, weight: .regular)
+    /// Pace narrative line — same metrics as monoSub for visual alignment.
+    static let paceFont    = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
 
     func plain(_ s: String) -> NSAttributedString {
         NSAttributedString(string: s, attributes: [.font: Self.monoFont])
+    }
+    func plainSized(_ s: String, font: NSFont, color: NSColor = .labelColor) -> NSAttributedString {
+        NSAttributedString(string: s, attributes: [.font: font, .foregroundColor: color])
     }
     func coloredText(_ s: String, color: NSColor) -> NSAttributedString {
         NSAttributedString(string: s, attributes: [.font: Self.monoFont, .foregroundColor: color])
@@ -876,6 +1032,13 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         default:     return .systemRed
         }
     }
+    /// Heavier mono font used for bar glyphs in places where we still use
+    /// character-based bars (currently only the menu bar title — the
+    /// dropdown switched to drawn bars below).
+    static let barFont = NSFont.monospacedSystemFont(ofSize: 14, weight: .bold)
+
+    /// Character-bar fallback (kept for the menu bar status title, where
+    /// embedding an NSImage attachment doesn't render reliably).
     func makeBar(pct: Double, width: Int) -> NSAttributedString {
         let clamped = max(0.0, min(100.0, pct))
         let filled = Int((clamped / 100.0 * Double(width)).rounded())
@@ -883,14 +1046,148 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let m = NSMutableAttributedString()
         if filled > 0 {
             m.append(NSAttributedString(string: String(repeating: "█", count: filled),
-                                         attributes: [.font: Self.monoFont, .foregroundColor: barColor(pct)]))
+                                         attributes: [.font: Self.barFont, .foregroundColor: barColor(pct)]))
         }
         if empty > 0 {
             m.append(NSAttributedString(string: String(repeating: "░", count: empty),
-                                         attributes: [.font: Self.monoFont, .foregroundColor: NSColor.tertiaryLabelColor]))
+                                         attributes: [.font: Self.barFont, .foregroundColor: NSColor.tertiaryLabelColor]))
         }
         return m
     }
+
+    /// Renders a rounded progress bar as an NSImage and returns it wrapped
+    /// in an NSAttributedString attachment for inline placement in
+    /// dropdown rows. Visually closer to the native macOS look than the
+    /// `█░` block-glyph version.
+    func drawnBar(pct: Double, width: CGFloat = 120, height: CGFloat = 8) -> NSAttributedString {
+        let clamped = max(0.0, min(100.0, pct))
+        let img = NSImage(size: NSSize(width: width, height: height), flipped: false) { rect in
+            let radius = height / 2
+            // Track
+            NSColor.tertiaryLabelColor.withAlphaComponent(0.25).setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            // Fill
+            let fillW = rect.width * clamped / 100.0
+            if fillW > 0 {
+                let fillRect = NSRect(x: 0, y: 0, width: max(fillW, height), height: rect.height)
+                self.barColor(clamped).setFill()
+                NSBezierPath(roundedRect: fillRect, xRadius: radius, yRadius: radius).fill()
+            }
+            return true
+        }
+        let att = NSTextAttachment()
+        att.image = img
+        att.bounds = NSRect(x: 0, y: -1, width: width, height: height)
+        return NSAttributedString(attachment: att)
+    }
+    /// Returns the named SF Symbol image, optionally tinted via palette
+    /// configuration. Used for menu item icons that need to look dimmer
+    /// (e.g. an "off" toggle) without changing the glyph itself.
+    func tintedSymbol(name: String, color: NSColor?) -> NSImage? {
+        guard let img = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
+        guard let color else { return img }
+        let cfg = NSImage.SymbolConfiguration(paletteColors: [color])
+        return img.withSymbolConfiguration(cfg) ?? img
+    }
+
+    /// SF Symbol that visually evokes each provider's actual brand mark.
+    /// Not the official logos (those would need bundled image assets and
+    /// have trademark caveats) — these are close-enough native macOS glyphs
+    /// that read as "Anthropic / OpenAI / Google / GitHub" at a glance.
+    func providerSymbol(_ key: String) -> String {
+        switch key {
+        case "claude":  return "asterisk"               // Anthropic's mark is an asterisk
+        case "codex":   return "circle.hexagongrid"     // OpenAI's hexagonal floral motif
+        case "gemini":  return "sparkles"               // Gemini's literal icon
+        case "copilot": return "chevron.left.forwardslash.chevron.right" // GH Copilot code-y
+        default:        return "circle.fill"
+        }
+    }
+
+    /// Bold provider-name heading with a brand-tinted SF-symbol on the
+    /// left. Matches CodexBar's section style — large, system font, no
+    /// monospace. Returns the line WITHOUT a trailing newline so the
+    /// caller can decide spacing.
+    func sectionHeader(_ name: String, key: String) -> NSAttributedString {
+        let m = NSMutableAttributedString()
+        let tint = PROVIDER_COLORS[key] ?? NSColor.labelColor
+        let symName = providerSymbol(key)
+        if let raw = NSImage(systemSymbolName: symName, accessibilityDescription: nil) {
+            let cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .bold)
+                .applying(.init(paletteColors: [tint]))
+            let img = raw.withSymbolConfiguration(cfg) ?? raw
+            let attachment = NSTextAttachment()
+            attachment.image = img
+            attachment.bounds = NSRect(x: 0, y: -2, width: 16, height: 16)
+            m.append(NSAttributedString(attachment: attachment))
+            m.append(plainSized("  ", font: Self.headerFont))
+        } else {
+            m.append(plainSized("●  ", font: Self.headerFont, color: tint))
+        }
+        m.append(plainSized(name, font: Self.headerFont))
+        return m
+    }
+
+    /// Bold metric heading inside a provider block — "Session", "Weekly", etc.
+    func metricHeader(_ name: String) -> NSAttributedString {
+        plainSized(name, font: Self.metricFont)
+    }
+
+    /// Thin horizontal separator rendered as an NSImage attachment so it
+    /// inlines cleanly into the dropdown's attributed text.
+    func separatorLine() -> NSAttributedString {
+        let img = NSImage(size: NSSize(width: CONTENT_WIDTH, height: 1), flipped: false) { rect in
+            NSColor.separatorColor.setFill()
+            rect.fill()
+            return true
+        }
+        let att = NSTextAttachment()
+        att.image = img
+        att.bounds = NSRect(x: 0, y: 3, width: CONTENT_WIDTH, height: 1)
+        return NSAttributedString(attachment: att)
+    }
+
+    /// Two-column row: `left` flush left, `right` flush right against
+    /// CONTENT_WIDTH via a right-aligned tab stop. Both default to muted
+    /// secondary color so the bucket's bar stays the visual anchor.
+    func twoColLine(left: String, right: String,
+                    font: NSFont? = nil,
+                    leftColor: NSColor = .secondaryLabelColor,
+                    rightColor: NSColor = .secondaryLabelColor) -> NSAttributedString {
+        let f = font ?? Self.subFont
+        let para = NSMutableParagraphStyle()
+        para.tabStops = [NSTextTab(textAlignment: .right, location: CONTENT_WIDTH, options: [:])]
+        let m = NSMutableAttributedString()
+        m.append(NSAttributedString(string: left, attributes: [
+            .font: f, .foregroundColor: leftColor, .paragraphStyle: para,
+        ]))
+        m.append(NSAttributedString(string: "\t" + right, attributes: [
+            .font: f, .foregroundColor: rightColor, .paragraphStyle: para,
+        ]))
+        return m
+    }
+
+    /// "Xh YYm" for short windows, "Xd Yh" once the remaining time crosses
+    /// a day — keeps the right-aligned reset countdown compact.
+    func formatResetLong(_ minutes: Int) -> String {
+        if minutes >= 60 * 24 {
+            let d = minutes / (60 * 24)
+            let h = (minutes % (60 * 24)) / 60
+            return "\(d)d \(h)h"
+        }
+        let h = minutes / 60
+        let m = minutes % 60
+        return String(format: "%dh %02dm", h, m)
+    }
+
+    /// Legacy thin header used in setDetail's pre-data placeholder paths.
+    /// Kept so non-render callers don't break. New layout uses sectionHeader.
+    func providerHeader(_ name: String, key: String, newline: Bool = true) -> NSAttributedString {
+        let m = NSMutableAttributedString(attributedString: sectionHeader(name, key: key))
+        if newline { m.append(plainSized("\n", font: Self.headerFont)) }
+        return m
+    }
+
     /// Badge for Anthropic service-status degradations (statuspage indicator).
     /// Color map matches the upstream "minor/major/critical" semantics.
     func serviceStatusBadge(indicator: String, description: String) -> NSAttributedString {
@@ -904,57 +1201,78 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return coloredText("⚠ Anthropic: \(description)\n", color: color)
     }
 
-    /// "pace  87% projected at reset · +$12 more" line, colored by projected value.
-    /// The 5h window is 300 minutes long; elapsed = 300 - mins-until-reset.
-    /// If a ccusage active-block payload is provided, also appends the
-    /// projected additional cost (`projection.totalCost - costUSD`).
-    func paceLine(currentPct: Double, minutesUntilReset: Int,
-                  activeBlock: [String: Any]? = nil) -> NSAttributedString? {
+/// Metric block: bold label, full-width pill bar, then a single
+    /// monospace line "%pct · resets in Xh Ym". Single-line on purpose —
+    /// keeps numerics colour-coded (our identity) and sidesteps the
+    /// tab-stop wrap that the right-aligned two-column layout triggered.
+    func appendBucketBlock(_ out: NSMutableAttributedString, label: String, b: [String: Any],
+                           showReset: Bool = true) {
+        let pct = b["utilization"] as? Double ?? 0
+        let resetIso = b["resets_at"] as? String ?? ""
+
+        out.append(metricHeader(label))
+        out.append(plainSized("\n", font: Self.metricFont))
+        out.append(drawnBar(pct: pct, width: CONTENT_WIDTH, height: 7))
+        out.append(plainSized("\n", font: Self.monoSub))
+
+        let pctColor = barColor(pct)
+        let line = NSMutableAttributedString()
+        line.append(NSAttributedString(
+            string: String(format: "%.1f%%", pct),
+            attributes: [.font: Self.monoSub, .foregroundColor: pctColor]
+        ))
+        if showReset, let m = minutesUntil(iso: resetIso), m > 0 {
+            line.append(NSAttributedString(
+                string: "  ·  resets in " + formatResetLong(m),
+                attributes: [.font: Self.monoSub, .foregroundColor: NSColor.secondaryLabelColor]
+            ))
+        }
+        out.append(line)
+        out.append(plainSized("\n\n", font: Self.monoSub))
+    }
+
+    /// Pace narrative — colour-coded by outcome (red/yellow/green) so the
+    /// state reads at a glance. This is our distinctive twist on the
+    /// CodexBar "Pace: Behind (-X%) · Lasts to reset" format.
+    func paceNarrativeLine(currentPct: Double, minutesUntilReset: Int,
+                           activeBlock: [String: Any]? = nil) -> NSAttributedString? {
         let elapsed = 300 - minutesUntilReset
         guard elapsed > 0 else { return nil }
+        if Double(elapsed) / 300.0 < PACE_MIN_ELAPSED_FRACTION { return nil }
         let projected = currentPct / Double(elapsed) * 300.0
-        let clamped = min(projected, 999)
-        let arrow = projected <= 100 ? "→" : "⚠"
 
-        var summary: String
+        let outcome: String
+        let outcomeColor: NSColor
         if projected > 100 {
             let minutesTo100 = currentPct < 100
                 ? Int(Double(elapsed) * (100 - currentPct) / currentPct)
                 : 0
-            summary = String(format: "   pace      %@ %.0f%% at reset (hits 100%% in %dm)",
-                             arrow, clamped, minutesTo100)
+            let runOut = minutesTo100 >= 60
+                ? String(format: "%dh %02dm", minutesTo100 / 60, minutesTo100 % 60)
+                : "\(minutesTo100)m"
+            outcome = "runs out in \(runOut)"
+            outcomeColor = .systemRed
+        } else if projected >= 80 {
+            outcome = "lasts until reset (tight)"
+            outcomeColor = .systemYellow
         } else {
-            summary = String(format: "   pace      %@ %.0f%% projected at reset",
-                             arrow, clamped)
+            outcome = "lasts until reset"
+            outcomeColor = .systemGreen
         }
-
-        // Append projected additional spend, if ccusage gave us the numbers.
+        let m = NSMutableAttributedString()
+        m.append(plainSized("pace  ", font: Self.paceFont, color: .secondaryLabelColor))
+        m.append(plainSized(outcome, font: Self.paceFont, color: outcomeColor))
+        // Optional projected extra spend.
         if let a = activeBlock,
            let spent = a["costUSD"] as? Double,
            let projectedTotal = (a["projection"] as? [String: Any])?["totalCost"] as? Double {
             let delta = max(0, projectedTotal - spent)
             if delta >= 0.01 {
-                summary += String(format: "  ·  +$%.2f more", delta)
+                m.append(plainSized(String(format: "  ·  +$%.2f more", delta),
+                                    font: Self.paceFont, color: .secondaryLabelColor))
             }
         }
-
-        return coloredText(summary, color: barColor(clamped))
-    }
-
-    func appendBucketLine(_ out: NSMutableAttributedString, label: String, b: [String: Any]) {
-        let pct = b["utilization"] as? Double ?? 0
-        let resetIso = b["resets_at"] as? String ?? ""
-        out.append(plain("   \(label) "))
-        out.append(makeBar(pct: pct, width: 20))
-        out.append(coloredText(String(format: "  %5.1f%%", pct), color: barColor(pct)))
-        if let m = minutesUntil(iso: resetIso), m > 0 {
-            let h = m / 60, mm = m % 60
-            out.append(plain(String(format: "  resets in %dh %02dm", h, mm)))
-            if let local = formatLocalTime(iso: resetIso) {
-                out.append(plain(" (\(local))"))
-            }
-        }
-        out.append(plain("\n"))
+        return m
     }
 
     static let timeFmt: DateFormatter = {
