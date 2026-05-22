@@ -41,9 +41,10 @@ let PROVIDER_COLORS: [String: NSColor] = [
 /// window has elapsed — projections from <3% sample are noise.
 let PACE_MIN_ELAPSED_FRACTION: Double = 0.03
 
-/// Fixed content width for the dropdown body — drives bar width and the
-/// right-alignment of two-column rows like "X% used … Resets in Yh Zm".
-let CONTENT_WIDTH: CGFloat = 280
+/// Fixed content width for the dropdown body. Sized to fit the
+/// "Session [bar] 77.0% · 1h 17m" + pace-line full width without
+/// wrapping in semibold monospaced font.
+let CONTENT_WIDTH: CGFloat = 320
 
 func shortModel(_ raw: String) -> String {
     // claude-opus-4-7 -> opus-4.7
@@ -86,7 +87,7 @@ func blockTotalTokens(_ d: [String: Any]) -> Int {
 
 // Widget version, bumped manually each release. Compared against the
 // `tag_name` of the latest release fetched from the configured source.
-let WIDGET_VERSION = "0.4.0"
+let WIDGET_VERSION = "0.5.0"
 // Default update source. Overridable at runtime by ~/.cache/claude-usage-bar/update.json
 // — install.sh writes that file pointing at the distribution it came from
 // (GitHub Releases for the standalone repo, GitLab Releases for the
@@ -161,11 +162,13 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(dailyItem)
         menu.addItem(weeklyItem)
         menu.addItem(.separator())
+        // Section label above the alerting block so it reads as its own
+        // group rather than blending into the maintenance footer.
+        menu.addItem(menuSectionLabel("ALERTS & NOTIFICATIONS"))
         notifToggleItem.target = self
         notifToggleItem.action = #selector(toggleNotif)
         menu.addItem(notifToggleItem)
         menu.addItem(notifDelayItem)
-        menu.addItem(.separator())
         alertToggleItem.target = self
         alertToggleItem.action = #selector(toggleAlert)
         menu.addItem(alertToggleItem)
@@ -228,12 +231,19 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             refresh()
             return
         }
-        // Attach menu, show it, detach so the next click hits our action
-        // handler again instead of being captured by the menu.
+        // Attach the menu and let the system open it. Detaching happens
+        // in menuDidClose — detaching via async timer used to race with
+        // submenu hover tracking and silently kill all child submenus.
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.statusItem.menu = nil
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        // Detach only the root menu so the next click on the status bar
+        // routes through statusItemClicked again (preserving right-click
+        // refresh). Submenu closures also call menuDidClose; ignore those.
+        if menu === self.menu {
+            statusItem.menu = nil
         }
     }
 
@@ -334,20 +344,19 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var emittedSection = false
         func sectionSpacer() {
             if emittedSection {
+                out.append(plainSized("\n", font: Self.subFont))
                 out.append(separatorLine())
-                out.append(plainSized("\n\n", font: Self.subFont))
+                out.append(plainSized("\n", font: Self.subFont))
             }
             emittedSection = true
         }
         let nl = { (font: NSFont) in self.plainSized("\n", font: font) }
 
-        /// Single-line muted subtitle under the section header. No tab-stops
-        /// — avoids the right-aligned wrap bug.
+        /// Single-line muted subtitle under a section header.
         func subtitleLine(_ parts: [String], _ extra: NSAttributedString? = nil) {
             let s = parts.joined(separator: "  ·  ")
             out.append(plainSized(s, font: Self.subFont, color: .secondaryLabelColor))
             if let extra { out.append(extra) }
-            out.append(nl(Self.subFont))
             out.append(nl(Self.subFont))
         }
 
@@ -356,23 +365,23 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             out.append(sectionHeader("Claude", key: "claude"))
             out.append(nl(Self.headerFont))
             subtitleLine(["updated " + Self.timeFmt.string(from: Date()), "OAuth"])
+            out.append(nl(Self.subFont))
 
-            if let f = fiveHour { appendBucketBlock(out, label: "Session", b: f) }
-            if let s = sevenDay { appendBucketBlock(out, label: "Weekly",  b: s) }
-            // Pace narrative sits under Weekly.
+            if let f = fiveHour { appendBucketLine(out, label: "Session", b: f) }
+            if let s = sevenDay { appendBucketLine(out, label: "Weekly",  b: s) }
+            // Pace narrative sits under Weekly, indented to align with the bar column.
             if let pct = fiveHourPct, let mins = fiveHourResetMin {
                 if let line = paceNarrativeLine(currentPct: pct, minutesUntilReset: mins,
                                                 activeBlock: active) {
                     out.append(line)
                     out.append(nl(Self.paceFont))
-                    out.append(nl(Self.subFont))
                 }
             }
             if let o = oauth["seven_day_opus"]   as? [String: Any] {
-                appendBucketBlock(out, label: "Opus", b: o)
+                appendBucketLine(out, label: "Opus", b: o)
             }
             if let s = oauth["seven_day_sonnet"] as? [String: Any] {
-                appendBucketBlock(out, label: "Sonnet", b: s)
+                appendBucketLine(out, label: "Sonnet", b: s)
             }
         }
 
@@ -396,8 +405,9 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     parts.append("OAuth")
                     subtitleLine(parts)
                 }
-                if let f = cx5 { appendBucketBlock(out, label: "Session", b: f) }
-                if let s = cx7 { appendBucketBlock(out, label: "Weekly",  b: s) }
+                out.append(nl(Self.subFont))
+                if let f = cx5 { appendBucketLine(out, label: "Session", b: f) }
+                if let s = cx7 { appendBucketLine(out, label: "Weekly",  b: s) }
             }
         }
 
@@ -408,13 +418,14 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             out.append(sectionHeader("Gemini", key: "gemini"))
             out.append(nl(Self.headerFont))
             subtitleLine(["updated " + Self.timeFmt.string(from: Date()), "Code Assist"])
+            out.append(nl(Self.subFont))
             for m in models {
                 let name = (m["name"] as? String) ?? "model"
                 let bucket: [String: Any] = [
                     "utilization": m["utilization"] ?? 0,
                     "resets_at":   m["resets_at"]   ?? "",
                 ]
-                appendBucketBlock(out, label: name, b: bucket)
+                appendBucketLine(out, label: name, b: bucket)
             }
         }
 
@@ -423,7 +434,7 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let entries: [(String, String)] = [
                 ("Chat", "chat"),
                 ("Completions", "completions"),
-                ("Premium interactions", "premium"),
+                ("Premium", "premium"),
             ]
             let buckets = entries.compactMap { tup -> (String, [String: Any])? in
                 guard let b = copilot[tup.1] as? [String: Any] else { return nil }
@@ -434,16 +445,15 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 out.append(sectionHeader("Copilot", key: "copilot"))
                 out.append(nl(Self.headerFont))
                 subtitleLine(["updated " + Self.timeFmt.string(from: Date()), "GitHub"])
+                out.append(nl(Self.subFont))
                 for (label, b) in buckets {
                     if (b["unlimited"] as? Bool) == true {
-                        out.append(metricHeader(label))
-                        out.append(nl(Self.metricFont))
-                        out.append(plainSized("unlimited", font: Self.monoSub,
-                                              color: .secondaryLabelColor))
-                        out.append(nl(Self.monoSub))
-                        out.append(nl(Self.monoSub))
+                        let padded = label.padding(toLength: 9, withPad: " ", startingAt: 0)
+                        out.append(NSAttributedString(string: padded + "  unlimited\n",
+                            attributes: [.font: Self.metricFont,
+                                         .foregroundColor: NSColor.secondaryLabelColor]))
                     } else {
-                        appendBucketBlock(out, label: label, b: b)
+                        appendBucketLine(out, label: label, b: b)
                     }
                 }
             }
@@ -510,20 +520,21 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let toggleLabel: String
         if alertEnabled && !alertThresholds.isEmpty {
             let tiers = alertThresholds.sorted().map { "\($0)" }.joined(separator: "/")
-            toggleLabel = "alert · on · \(tiers)%"
+            toggleLabel = "Usage alert  ·  on  ·  \(tiers)%"
         } else {
-            toggleLabel = "alert · off"
+            toggleLabel = "Usage alert  ·  off"
         }
-        alertToggleItem.attributedTitle = plain(toggleLabel)
-        // Outlined + dimmed triangle when off so the warn glyph doesn't
-        // demand attention for a feature that's intentionally disabled.
+        alertToggleItem.attributedTitle = menuToggleLabel(toggleLabel, active: alertEnabled)
+        // Bright orange triangle when active — eye-catching since this is
+        // the user's "wake me up at N%" signal; muted outline when off.
         alertToggleItem.image = tintedSymbol(
             name: alertEnabled ? "exclamationmark.triangle.fill" : "exclamationmark.triangle",
-            color: alertEnabled ? nil : NSColor.tertiaryLabelColor
+            color: alertEnabled ? NSColor.systemOrange : NSColor.tertiaryLabelColor
         )
 
         let tiersStr = alertThresholds.sorted().map(String.init).joined(separator: "/")
-        alertThresholdItem.attributedTitle = plain("thresholds  (\(tiersStr.isEmpty ? "—" : tiersStr + "%"))")
+        alertThresholdItem.attributedTitle =
+            menuDetailLabel("Thresholds  (\(tiersStr.isEmpty ? "—" : tiersStr + "%"))")
         alertThresholdItem.image = NSImage(systemSymbolName: "gauge.medium", accessibilityDescription: nil)
         let sub = NSMenu()
         for n in ALERT_THRESHOLD_OPTIONS {
@@ -850,15 +861,15 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// after the next poll.
     func rebuildNotifSubmenu() {
         let toggleLabel = notifEnabled
-            ? "notifications · on · \(notifDelay)s"
-            : "notifications · off"
-        notifToggleItem.attributedTitle = plain(toggleLabel)
+            ? "Notifications  ·  on  ·  \(notifDelay)s"
+            : "Notifications  ·  off"
+        notifToggleItem.attributedTitle = menuToggleLabel(toggleLabel, active: notifEnabled)
         notifToggleItem.image = tintedSymbol(
             name: notifEnabled ? "bell.fill" : "bell.slash",
-            color: notifEnabled ? nil : NSColor.tertiaryLabelColor
+            color: notifEnabled ? NSColor.systemBlue : NSColor.tertiaryLabelColor
         )
 
-        notifDelayItem.attributedTitle = plain("delay  (\(notifDelay)s)")
+        notifDelayItem.attributedTitle = menuDetailLabel("Delay  (\(notifDelay)s)")
         notifDelayItem.image = NSImage(systemSymbolName: "clock", accessibilityDescription: nil)
         let sub = NSMenu()
         for n in NOTIF_DELAY_OPTIONS {
@@ -1003,17 +1014,17 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // ── attributed-string helpers ───────────────────────────────────────
     static let monoFont    = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-    /// Bold provider-name header. Slightly smaller than CodexBar's so
-    /// the screen has room without the bar widget feeling oversized.
-    static let headerFont  = NSFont.systemFont(ofSize: 15, weight: .bold)
-    /// Metric block heading: Session / Weekly / Sonnet / etc.
-    static let metricFont  = NSFont.systemFont(ofSize: 12, weight: .semibold)
-    /// Compact monospace for the inline figures under each bar — our
-    /// signature touch versus CodexBar's prose two-column layout.
+    /// Bold provider-name header — keep big enough to anchor the section.
+    static let headerFont  = NSFont.systemFont(ofSize: 14, weight: .bold)
+    /// Bold mono label for each bucket row ("Session" / "Weekly" / etc.).
+    /// Bolder than the data text but still monospaced so columns align
+    /// across rows — that's the "old layout" identity we want back.
+    static let metricFont  = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+    /// Compact monospace for the inline figures next to the bar.
     static let monoSub     = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-    /// Section subtitle ("Updated HH:MM · OAuth").
+    /// Section subtitle ("updated HH:MM · OAuth").
     static let subFont     = NSFont.systemFont(ofSize: 11, weight: .regular)
-    /// Pace narrative line — same metrics as monoSub for visual alignment.
+    /// Pace narrative line — mono so it visually aligns with the bucket rows.
     static let paceFont    = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
 
     func plain(_ s: String) -> NSAttributedString {
@@ -1088,6 +1099,42 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let color else { return img }
         let cfg = NSImage.SymbolConfiguration(paletteColors: [color])
         return img.withSymbolConfiguration(cfg) ?? img
+    }
+
+    /// Disabled small-caps section header for a group of related menu
+    /// items (e.g. "ALERTS & NOTIFICATIONS"). Visually distinct from
+    /// regular rows so groups don't blend into one big list.
+    func menuSectionLabel(_ text: String) -> NSMenuItem {
+        let mi = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        mi.isEnabled = false
+        mi.attributedTitle = NSAttributedString(
+            string: text,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 10, weight: .bold),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+                .kern: 1.0,
+            ]
+        )
+        return mi
+    }
+
+    /// Bold system-font label for prominent toggle rows (notifications /
+    /// alert). Reads heavier than the mono-spaced data rows above.
+    func menuToggleLabel(_ text: String, active: Bool) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: active ? NSColor.labelColor : NSColor.secondaryLabelColor,
+        ])
+    }
+
+    /// Mono detail label used for sub-rows like "delay (30s)" and
+    /// "thresholds (90%)" — sits beneath the toggle and inherits the
+    /// detail-row look.
+    func menuDetailLabel(_ text: String) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ])
     }
 
     /// SF Symbol that visually evokes each provider's actual brand mark.
@@ -1201,34 +1248,40 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return coloredText("⚠ Anthropic: \(description)\n", color: color)
     }
 
-/// Metric block: bold label, full-width pill bar, then a single
-    /// monospace line "%pct · resets in Xh Ym". Single-line on purpose —
-    /// keeps numerics colour-coded (our identity) and sidesteps the
-    /// tab-stop wrap that the right-aligned two-column layout triggered.
-    func appendBucketBlock(_ out: NSMutableAttributedString, label: String, b: [String: Any],
-                           showReset: Bool = true) {
+/// Compact one-line bucket row, inspired by the original widget layout:
+    ///   `Session   [████░░] 78.0% · 1h 17m`
+    /// Bold-mono label padded to a fixed width keeps columns aligned
+    /// across rows; bar inline; %-colored by threshold; reset suffix
+    /// muted. The bold name + colored % give the row visual weight
+    /// without expanding to three lines per metric.
+    func appendBucketLine(_ out: NSMutableAttributedString, label: String, b: [String: Any],
+                          showReset: Bool = true) {
         let pct = b["utilization"] as? Double ?? 0
         let resetIso = b["resets_at"] as? String ?? ""
 
-        out.append(metricHeader(label))
-        out.append(plainSized("\n", font: Self.metricFont))
-        out.append(drawnBar(pct: pct, width: CONTENT_WIDTH, height: 7))
-        out.append(plainSized("\n", font: Self.monoSub))
-
-        let pctColor = barColor(pct)
-        let line = NSMutableAttributedString()
-        line.append(NSAttributedString(
-            string: String(format: "%.1f%%", pct),
-            attributes: [.font: Self.monoSub, .foregroundColor: pctColor]
+        // Pad to 9 chars so labels of varying length still line up the
+        // bar column. Longer model names get truncated.
+        let trimmed = label.count > 9
+            ? String(label.prefix(9))
+            : label.padding(toLength: 9, withPad: " ", startingAt: 0)
+        out.append(NSAttributedString(
+            string: trimmed + "  ",
+            attributes: [.font: Self.metricFont, .foregroundColor: NSColor.labelColor]
+        ))
+        // `█░` block-character bar — heavier visual identity than the
+        // drawn pill, matches the original widget look.
+        out.append(makeBar(pct: pct, width: 12))
+        out.append(NSAttributedString(
+            string: String(format: "  %.1f%%", pct),
+            attributes: [.font: Self.monoSub, .foregroundColor: barColor(pct)]
         ))
         if showReset, let m = minutesUntil(iso: resetIso), m > 0 {
-            line.append(NSAttributedString(
-                string: "  ·  resets in " + formatResetLong(m),
+            out.append(NSAttributedString(
+                string: "  ·  " + formatResetLong(m),
                 attributes: [.font: Self.monoSub, .foregroundColor: NSColor.secondaryLabelColor]
             ))
         }
-        out.append(line)
-        out.append(plainSized("\n\n", font: Self.monoSub))
+        out.append(plainSized("\n", font: Self.monoSub))
     }
 
     /// Pace narrative — colour-coded by outcome (red/yellow/green) so the
@@ -1260,7 +1313,8 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             outcomeColor = .systemGreen
         }
         let m = NSMutableAttributedString()
-        m.append(plainSized("pace  ", font: Self.paceFont, color: .secondaryLabelColor))
+        // Indent to roughly align under the bar column of the bucket rows above.
+        m.append(plainSized("pace      ", font: Self.paceFont, color: .secondaryLabelColor))
         m.append(plainSized(outcome, font: Self.paceFont, color: outcomeColor))
         // Optional projected extra spend.
         if let a = activeBlock,
