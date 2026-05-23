@@ -87,7 +87,7 @@ func blockTotalTokens(_ d: [String: Any]) -> Int {
 
 // Widget version, bumped manually each release. Compared against the
 // `tag_name` of the latest release fetched from the configured source.
-let WIDGET_VERSION = "0.5.1"
+let WIDGET_VERSION = "0.5.2"
 // Default update source. Overridable at runtime by ~/.cache/claude-usage-bar/update.json
 // — install.sh writes that file pointing at the distribution it came from
 // (GitHub Releases for the standalone repo, GitLab Releases for the
@@ -105,6 +105,10 @@ let NOTIF_DELAY_OPTIONS: [Int] = [30, 60, 120, 300]
 // Multiple may be enabled at once — each fires exactly once per 5h window
 // (keyed by the window's `resets_at` timestamp).
 let ALERT_THRESHOLD_OPTIONS: [Int] = [25, 50, 75, 90, 95]
+// LaunchAgent that runs the widget at login. Path + label match install.sh
+// so a UI toggle and the installer agree on the same plist.
+let LAUNCH_AGENT_LABEL: String = "com.local.claude-usage-bar"
+let LAUNCH_AGENT_PLIST: String = "\(NSHomeDirectory())/Library/LaunchAgents/\(LAUNCH_AGENT_LABEL).plist"
 // Where alert config + last-fired window are persisted.
 let ALERT_CONFIG_PATH: String = {
     let home = NSHomeDirectory()
@@ -127,6 +131,8 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     let alertToggleItem     = NSMenuItem(title: "alert",      action: nil, keyEquivalent: "")
     let alertThresholdItem  = NSMenuItem(title: "thresholds", action: nil, keyEquivalent: "")
+    let autostartToggleItem = NSMenuItem(title: "autostart",  action: nil, keyEquivalent: "")
+    var autostartEnabled = false
     var alertEnabled = false
     var alertThresholds: Set<Int> = [90]            // tiers that fire
     var alertedWindowResetsAt: String? = nil         // which window we last fired in
@@ -173,6 +179,9 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alertToggleItem.action = #selector(toggleAlert)
         menu.addItem(alertToggleItem)
         menu.addItem(alertThresholdItem)
+        autostartToggleItem.target = self
+        autostartToggleItem.action = #selector(toggleAutostart)
+        menu.addItem(autostartToggleItem)
         menu.addItem(.separator())
         menu.addItem(intervalItem)
         menu.addItem(.separator())
@@ -196,6 +205,8 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         loadAlertConfig()
         loadIntervalConfig()
         rebuildIntervalSubmenu()
+        refreshAutostartState()
+        rebuildAutostartItem()
 
         refresh()
         scheduleTimer()
@@ -509,6 +520,8 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         rebuildNotifSubmenu()
         rebuildAlertItems()
+        refreshAutostartState()
+        rebuildAutostartItem()
 
         if let pct = fiveHourPct, let resetIso = fiveHourReset {
             checkAndFireAlert(util: pct, windowResetsAt: resetIso)
@@ -581,6 +594,91 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         saveAlertConfig()
         rebuildAlertItems()
         refresh()
+    }
+
+    /// Re-reads whether the LaunchAgent plist exists on disk. Cheap enough
+    /// to call on every refresh — handles the case where the user installs
+    /// or removes the agent externally (e.g. via install.sh / uninstall.sh).
+    func refreshAutostartState() {
+        autostartEnabled = FileManager.default.fileExists(atPath: LAUNCH_AGENT_PLIST)
+    }
+
+    /// Rebuilds the autostart toggle row to match `autostartEnabled`. Matches
+    /// the visual style of the notifications + alert toggles above.
+    func rebuildAutostartItem() {
+        let label = autostartEnabled
+            ? "Autostart at login  ·  on"
+            : "Autostart at login  ·  off"
+        autostartToggleItem.attributedTitle = menuToggleLabel(label, active: autostartEnabled)
+        autostartToggleItem.image = tintedSymbol(
+            name: autostartEnabled ? "power.circle.fill" : "power.circle",
+            color: autostartEnabled ? NSColor.systemGreen : NSColor.tertiaryLabelColor
+        )
+    }
+
+    /// Toggle target: writes (or removes) the LaunchAgent plist that points
+    /// at the currently-running binary, then `launchctl load`s / `unload`s
+    /// it so the change takes effect without a reboot. The plist path +
+    /// label intentionally match `install.sh` / `uninstall.sh` so the two
+    /// entry points don't fight over state.
+    @objc func toggleAutostart() {
+        if autostartEnabled {
+            disableAutostart()
+        } else {
+            enableAutostart()
+        }
+        refreshAutostartState()
+        rebuildAutostartItem()
+    }
+
+    /// Writes the LaunchAgent plist and loads it. Uses the actual path of
+    /// the running binary so an installed-anywhere build still autostarts
+    /// from the same location after reboot.
+    func enableAutostart() {
+        let dir = (LAUNCH_AGENT_PLIST as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true, attributes: nil
+        )
+        let binary = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        let plist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>Label</key>           <string>\(LAUNCH_AGENT_LABEL)</string>
+          <key>ProgramArguments</key><array><string>\(binary)</string></array>
+          <key>RunAtLoad</key>       <true/>
+          <key>KeepAlive</key>       <true/>
+          <key>StandardOutPath</key> <string>/tmp/\(LAUNCH_AGENT_LABEL).log</string>
+          <key>StandardErrorPath</key><string>/tmp/\(LAUNCH_AGENT_LABEL).log</string>
+        </dict>
+        </plist>
+        """
+        try? plist.write(toFile: LAUNCH_AGENT_PLIST, atomically: true, encoding: .utf8)
+        runLaunchctl(args: ["unload", LAUNCH_AGENT_PLIST])
+        runLaunchctl(args: ["load",   LAUNCH_AGENT_PLIST])
+    }
+
+    /// Unloads the agent and removes the plist. Doesn't kill the current
+    /// process — the user is using the widget right now; disabling autostart
+    /// just means it won't come back on next login.
+    func disableAutostart() {
+        runLaunchctl(args: ["unload", LAUNCH_AGENT_PLIST])
+        try? FileManager.default.removeItem(atPath: LAUNCH_AGENT_PLIST)
+    }
+
+    /// Synchronously runs `launchctl <args>` and discards its output.
+    /// `launchctl unload` on a missing plist prints an error to stderr but
+    /// exits 0 cleanly — fine to call unconditionally before a load.
+    func runLaunchctl(args: [String]) {
+        let task = Process()
+        task.launchPath = "/bin/launchctl"
+        task.arguments = args
+        let devNull = FileHandle(forWritingAtPath: "/dev/null")
+        task.standardOutput = devNull
+        task.standardError = devNull
+        try? task.run()
+        task.waitUntilExit()
     }
 
     /// Fires notifications for each enabled tier the utilization crosses,
