@@ -1,5 +1,10 @@
 # claude-usage-bar
 
+[![build](https://github.com/meduzkin/claude-usage-bar/actions/workflows/build.yml/badge.svg)](https://github.com/meduzkin/claude-usage-bar/actions/workflows/build.yml)
+[![shellcheck](https://github.com/meduzkin/claude-usage-bar/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/meduzkin/claude-usage-bar/actions/workflows/shellcheck.yml)
+[![codeql](https://github.com/meduzkin/claude-usage-bar/actions/workflows/codeql.yml/badge.svg)](https://github.com/meduzkin/claude-usage-bar/actions/workflows/codeql.yml)
+[![gitleaks](https://github.com/meduzkin/claude-usage-bar/actions/workflows/gitleaks.yml/badge.svg)](https://github.com/meduzkin/claude-usage-bar/actions/workflows/gitleaks.yml)
+
 > macOS menu-bar widget for AI coding agents — desktop notifications when Claude Code blocks on a permission prompt, threshold alerts on usage windows, and unified usage bars across Claude / Codex / Gemini / Copilot.
 
 ![claude-usage-bar dropdown](docs/screenshot.png?v=0.5.3)

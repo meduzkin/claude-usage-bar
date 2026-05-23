@@ -1,0 +1,30 @@
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '37 4 * * 1'   # weekly Mon 04:37 UTC
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  analyze:
+    name: CodeQL (Swift)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: swift
+      - name: Build for CodeQL
+        run: ./build.sh
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:swift"
