@@ -7,7 +7,7 @@
 
 > macOS menu-bar widget for AI coding agents — desktop notifications when Claude Code blocks on a permission prompt, threshold alerts on usage windows, and unified usage bars across Claude / Codex / Gemini / Copilot.
 
-![claude-usage-bar dropdown](docs/screenshot.png?v=0.5.3)
+![claude-usage-bar dropdown](docs/screenshot.png?v=0.5.4)
 
 ## Notifications
 
@@ -18,9 +18,16 @@ Two independent nudges, both opt-in from **ALERTS & NOTIFICATIONS** in the dropd
 
 ## At a glance
 
-Status-bar title is `[bar] NN%`. Tooltip carries the rest: `Claude · session 37% · resets in 1h 27m · week 12%`.
+Status-bar title is `[bar] NN%`. The bar uses 8 cells with Unicode partial-block fills (`▏▎▍▌▋▊▉█`) so even sub-12.5 % utilization shows colour, and the digits pad to a fixed width so the title doesn't shift on the 9 → 10 / 99 → 100 transition. Tooltip carries the rest: `Claude · session 37% · resets in 1h 27m · week 12%`.
 
 Right-click the icon to refresh without opening the dropdown.
+
+### Compact mode
+
+The **DISPLAY** group in the dropdown lets you swap the bar for a tighter `[provider icon] NN%` rendering — useful if you're tracking more than one assistant and want all of them visible in the menu bar at once.
+
+- `Compact mode` toggles the format. Provider icons keep their brand tint (Anthropic warm, OpenAI green, Gemini blue, Copilot purple).
+- `Show in compact ▸` selects which providers appear when compact mode is on — multi-select, with at least one always pinned. Headline percentage per provider: Claude / Codex 5-hour bucket; Gemini / Copilot the max across their parallel quotas.
 
 ## Dropdown
 
@@ -42,7 +49,7 @@ Sonnet     ░░░░░░░░░░░░     0.0%
 - **Copilot** — `Chat` / `Completions` / `Premium` from `api.github.com/copilot_internal/user`.
 - **pace** — projection under `Weekly`: `lasts until reset` / `lasts until reset (tight)` / `runs out in 1h 06m`, colour follows meaning. Appends `· +$X.XX more` when `ccusage` has the active block.
 - **service status** — top-of-dropdown badge when `status.anthropic.com` reports a minor / major / critical incident.
-- **details ▸ / daily ▸ / weekly ▸** — active 5h block (cost / tokens / burn) and the last 7d / 4w totals.
+- **details ▸** — active 5h block (cost / tokens / projected / burn / resets in), last session, and the last 7 daily + 4 weekly totals from ccusage, all in one submenu.
 - **refresh interval ▸** — 5 / 10 / 15 / 20 / 30 min (default 10). Background poll + on-open with a 30 s cooldown.
 - **Check for updates…** — self-update from GitHub or GitLab Releases (source picked at install time).
 

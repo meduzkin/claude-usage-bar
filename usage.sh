@@ -13,6 +13,14 @@
 
 set -euo pipefail
 
+# launchd hands us a stripped-down PATH (no Homebrew, no npm-global). Prepend
+# the common install locations so `node`, `npx`, `ccusage`, `gh`, etc. are
+# discoverable when the widget is spawned by launchd rather than a shell.
+# Without this, `find_ccusage` returns the cached npx path but executing it
+# fails because the shebang's `node` lookup misses.
+PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:${PATH:-/usr/bin:/bin}"
+export PATH
+
 KEYCHAIN_SERVICE="Claude Code-credentials"
 CACHE_DIR="${CLAUDE_USAGE_CACHE_DIR:-$HOME/.cache/claude-usage-bar}"
 CACHE_FILE="$CACHE_DIR/oauth.json"

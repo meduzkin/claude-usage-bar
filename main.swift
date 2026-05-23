@@ -87,7 +87,7 @@ func blockTotalTokens(_ d: [String: Any]) -> Int {
 
 // Widget version, bumped manually each release. Compared against the
 // `tag_name` of the latest release fetched from the configured source.
-let WIDGET_VERSION = "0.5.3"
+let WIDGET_VERSION = "0.5.4"
 // Default update source. Overridable at runtime by ~/.cache/claude-usage-bar/update.json
 // — install.sh writes that file pointing at the distribution it came from
 // (GitHub Releases for the standalone repo, GitLab Releases for the
@@ -102,6 +102,12 @@ let UPDATE_CONFIG_PATH = "\(NSHomeDirectory())/.cache/claude-usage-bar/update.js
 // daily background check doesn't re-nag them about the same version.
 // Reset (delete the file) to force a fresh notification on next check.
 let UPDATE_CHECK_STATE_PATH = "\(NSHomeDirectory())/.cache/claude-usage-bar/update-check.json"
+// Persists the compact-mode toggle + which providers the user wants to see
+// in the menu-bar title when compact mode is on.
+let DISPLAY_CONFIG_PATH = "\(NSHomeDirectory())/.cache/claude-usage-bar/display.json"
+// Provider order shown in the compact title. Same order as the dropdown
+// section list so the eye reads them consistently across both surfaces.
+let COMPACT_PROVIDER_ORDER: [String] = ["claude", "codex", "gemini", "copilot"]
 // Background update poll cadence. 24h is enough — releases ship on the
 // order of days, and the GitHub Releases API is cheap (single GET, no
 // per-IP throttle that we'd hit at this rate).
@@ -145,6 +151,10 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let alertToggleItem     = NSMenuItem(title: "alert",      action: nil, keyEquivalent: "")
     let alertThresholdItem  = NSMenuItem(title: "thresholds", action: nil, keyEquivalent: "")
     let autostartToggleItem = NSMenuItem(title: "autostart",  action: nil, keyEquivalent: "")
+    let compactToggleItem   = NSMenuItem(title: "compact",    action: nil, keyEquivalent: "")
+    let compactProvidersItem = NSMenuItem(title: "providers", action: nil, keyEquivalent: "")
+    var compactMode = false
+    var compactProviders: Set<String> = ["claude"]
     var autostartEnabled = false
     var alertEnabled = false
     var alertThresholds: Set<Int> = [90]            // tiers that fire
@@ -175,11 +185,15 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(detailItem)
         menu.addItem(.separator())
         detailsSubItem.isHidden = true
-        dailyItem.isHidden = true
-        weeklyItem.isHidden = true
         menu.addItem(detailsSubItem)
-        menu.addItem(dailyItem)
-        menu.addItem(weeklyItem)
+        menu.addItem(.separator())
+        // Display section — controls how the title looks in the menu bar
+        // (bar + percent vs. compact provider-icon + percent).
+        menu.addItem(menuSectionLabel("DISPLAY"))
+        compactToggleItem.target = self
+        compactToggleItem.action = #selector(toggleCompact)
+        menu.addItem(compactToggleItem)
+        menu.addItem(compactProvidersItem)
         menu.addItem(.separator())
         // Section label above the alerting block so it reads as its own
         // group rather than blending into the maintenance footer.
@@ -220,6 +234,8 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildIntervalSubmenu()
         refreshAutostartState()
         rebuildAutostartItem()
+        loadDisplayConfig()
+        rebuildCompactItems()
 
         refresh()
         scheduleTimer()
@@ -328,10 +344,15 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                       Date().timeIntervalSince(lastSuccessfulRefreshAt) >
                         Double(refreshIntervalMinutes * 60) * 2.5
         let titleStr = NSMutableAttributedString()
-        if let pct = fiveHourPct {
+        if compactMode {
+            // Compact: provider icon(s) + %, no bar.
+            statusItem.button?.attributedTitle = makeCompactTitle(payload: payload)
+        } else if let pct = fiveHourPct {
             titleStr.append(makeBar(pct: pct, width: 8))
             let pctColor = isStale ? NSColor.tertiaryLabelColor : barColor(pct)
-            titleStr.append(coloredText(String(format: " %.0f%%", pct), color: pctColor))
+            // Pad the digits to width 3 so the title doesn't shift left on
+            // the 9→10 / 99→100 transitions; the bar is fixed-width already.
+            titleStr.append(coloredText(String(format: " %3.0f%%", pct), color: pctColor))
             statusItem.button?.attributedTitle = titleStr
 
             // Tooltip carries the parts we stripped from the title
@@ -520,13 +541,15 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             detailsOut.append(plain("   activity   \(last)\n"))
         }
 
+        // Historical aggregates from ccusage live inside the same submenu
+        // so the dropdown root stays a single-row "details ▸" entry.
+        appendHistoryBlock(to: detailsOut, label: "daily",  rows: daily)
+        appendHistoryBlock(to: detailsOut, label: "weekly", rows: weekly)
+
         // No trailing footer — each section already carries its own
         // "Updated HH:MM" subtitle.
         setDetail(out)
         populateDetailsSubmenu(detailsOut)
-
-        populateHistorySubmenu(item: dailyItem, label: "daily",  rows: daily)
-        populateHistorySubmenu(item: weeklyItem, label: "weekly", rows: weekly)
 
         if let n = payload["notif"] as? [String: Any] {
             notifEnabled = (n["enabled"] as? Bool) ?? false
@@ -536,6 +559,7 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildAlertItems()
         refreshAutostartState()
         rebuildAutostartItem()
+        rebuildCompactItems()
 
         if let pct = fiveHourPct, let resetIso = fiveHourReset {
             checkAndFireAlert(util: pct, windowResetsAt: resetIso)
@@ -693,6 +717,156 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         task.standardError = devNull
         try? task.run()
         task.waitUntilExit()
+    }
+
+    // ── compact-mode display config ────────────────────────────────────
+
+    /// Loads the persisted compact-mode toggle and selected providers from
+    /// `~/.cache/claude-usage-bar/display.json`. Missing fields fall back
+    /// to defaults (off, Claude-only). Bad config doesn't crash — we just
+    /// keep defaults.
+    func loadDisplayConfig() {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: DISPLAY_CONFIG_PATH)),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return }
+        if let v = obj["compactMode"] as? Bool { compactMode = v }
+        if let arr = obj["compactProviders"] as? [String] {
+            let allowed = Set(COMPACT_PROVIDER_ORDER)
+            let filtered = Set(arr).intersection(allowed)
+            // Guard against an empty selection — would render an empty
+            // title and be invisible. Fall back to Claude.
+            compactProviders = filtered.isEmpty ? ["claude"] : filtered
+        }
+    }
+
+    /// Persists current compact-mode state. Atomic write so a crash
+    /// mid-save doesn't leave a half-written JSON file.
+    func saveDisplayConfig() {
+        let dir = (DISPLAY_CONFIG_PATH as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true, attributes: nil
+        )
+        let obj: [String: Any] = [
+            "compactMode":      compactMode,
+            "compactProviders": Array(compactProviders).sorted(),
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]) else { return }
+        try? data.write(to: URL(fileURLWithPath: DISPLAY_CONFIG_PATH), options: .atomic)
+    }
+
+    /// Refreshes the compact-mode toggle row + the providers submenu so they
+    /// match `compactMode` / `compactProviders`. Visually parallels the
+    /// notifications / usage-alert rows.
+    func rebuildCompactItems() {
+        let selected = COMPACT_PROVIDER_ORDER
+            .filter { compactProviders.contains($0) }
+            .joined(separator: " / ")
+        let toggleLabel = compactMode
+            ? "Compact mode  ·  on  ·  \(selected.isEmpty ? "—" : selected)"
+            : "Compact mode  ·  off"
+        compactToggleItem.attributedTitle = menuToggleLabel(toggleLabel, active: compactMode)
+        compactToggleItem.image = tintedSymbol(
+            name: compactMode ? "rectangle.compress.vertical" : "rectangle.expand.vertical",
+            color: compactMode ? NSColor.systemTeal : NSColor.tertiaryLabelColor
+        )
+
+        compactProvidersItem.attributedTitle = menuDetailLabel("Show in compact")
+        compactProvidersItem.image = NSImage(systemSymbolName: "rectangle.3.group", accessibilityDescription: nil)
+        let sub = NSMenu()
+        for key in COMPACT_PROVIDER_ORDER {
+            let mi = NSMenuItem(
+                title: "",
+                action: #selector(toggleCompactProvider(_:)),
+                keyEquivalent: ""
+            )
+            mi.target = self
+            mi.representedObject = key
+            let marker = compactProviders.contains(key) ? "✓ " : "   "
+            mi.attributedTitle = plain("\(marker)\(key)")
+            sub.addItem(mi)
+        }
+        compactProvidersItem.submenu = sub
+    }
+
+    @objc func toggleCompact() {
+        compactMode.toggle()
+        saveDisplayConfig()
+        rebuildCompactItems()
+        refresh()
+    }
+
+    @objc func toggleCompactProvider(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        if compactProviders.contains(key) {
+            // Don't allow the user to deselect the last provider — empty
+            // title would render as a 0-width status item and disappear.
+            if compactProviders.count > 1 { compactProviders.remove(key) }
+        } else {
+            compactProviders.insert(key)
+        }
+        saveDisplayConfig()
+        rebuildCompactItems()
+        refresh()
+    }
+
+    /// Builds the compact-title string: per provider, a tinted SF symbol
+    /// followed by ` NN%` using the same regular-12pt font as the percent
+    /// label in the default title. Providers are space-padded apart so the
+    /// row reads as discrete pairs.
+    func makeCompactTitle(payload: [String: Any]) -> NSAttributedString {
+        let m = NSMutableAttributedString()
+        var first = true
+        for key in COMPACT_PROVIDER_ORDER where compactProviders.contains(key) {
+            guard let pct = compactPct(key: key, payload: payload) else { continue }
+            if !first {
+                m.append(NSAttributedString(string: "  ",
+                    attributes: [.font: Self.monoFont]))
+            }
+            first = false
+            if let img = tintedSymbol(name: providerSymbol(key), color: PROVIDER_COLORS[key]) {
+                let att = NSTextAttachment()
+                att.image = img
+                att.bounds = NSRect(x: 0, y: -3, width: 16, height: 16)
+                m.append(NSAttributedString(attachment: att))
+            }
+            m.append(NSAttributedString(
+                string: String(format: " %3.0f%%", pct),
+                attributes: [.font: Self.monoFont, .foregroundColor: barColor(pct)]
+            ))
+        }
+        // Nothing to show? Render a placeholder so the status item still
+        // has a clickable surface.
+        if m.length == 0 {
+            m.append(NSAttributedString(string: "—",
+                attributes: [.font: Self.monoFont, .foregroundColor: NSColor.tertiaryLabelColor]))
+        }
+        return m
+    }
+
+    /// Returns the headline percentage we display for a provider in compact
+    /// mode. For Claude/Codex that's the 5-hour bucket; for Gemini and
+    /// Copilot the highest utilization across their sub-buckets, since
+    /// those providers expose multiple parallel quotas.
+    func compactPct(key: String, payload: [String: Any]) -> Double? {
+        switch key {
+        case "claude":
+            return ((payload["oauth"] as? [String: Any])?["five_hour"] as? [String: Any])?["utilization"] as? Double
+        case "codex":
+            return ((payload["codex"] as? [String: Any])?["five_hour"] as? [String: Any])?["utilization"] as? Double
+        case "gemini":
+            let models = (payload["gemini"] as? [String: Any])?["models"] as? [[String: Any]] ?? []
+            let vals = models.compactMap { $0["utilization"] as? Double }
+            return vals.max()
+        case "copilot":
+            let cp = payload["copilot"] as? [String: Any] ?? [:]
+            let buckets = ["chat", "completions", "premium"]
+                .compactMap { cp[$0] as? [String: Any] }
+                .filter { ($0["unlimited"] as? Bool) != true }
+            let vals = buckets.compactMap { $0["utilization"] as? Double }
+            return vals.max()
+        default:
+            return nil
+        }
     }
 
     /// Fires notifications for each enabled tier the utilization crosses,
@@ -1103,6 +1277,23 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         detailsSubItem.submenu = sub
     }
 
+    /// Appends a daily-or-weekly table into the details submenu, matching
+    /// the period / cost / tokens / models columns the standalone history
+    /// submenus used. Header row is rendered only if `rows` has any data;
+    /// otherwise the whole block is silently skipped.
+    func appendHistoryBlock(to out: NSMutableAttributedString, label: String, rows: [[String: Any]]) {
+        guard !rows.isEmpty else { return }
+        out.append(plain("\n◆ \(label) · last \(rows.count)\n"))
+        out.append(plain("   period        cost    tokens   models\n"))
+        for r in rows {
+            let p = (r["period"] as? String) ?? "?"
+            let c = (r["totalCost"] as? Double) ?? 0
+            let t = sumTokens(r)
+            let m = shortModels((r["modelsUsed"] as? [String]) ?? [])
+            out.append(plain(String(format: "   %@   $%6.2f  %@   %@\n", p, c, fmtTokens(t), m)))
+        }
+    }
+
     func populateHistorySubmenu(item: NSMenuItem, label: String, rows: [[String: Any]]) {
         guard !rows.isEmpty else {
             item.isHidden = true
@@ -1220,19 +1411,38 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static let barFont = NSFont.monospacedSystemFont(ofSize: 14, weight: .bold)
 
     /// Character-bar fallback (kept for the menu bar status title, where
-    /// embedding an NSImage attachment doesn't render reliably).
+    /// embedding an NSImage attachment doesn't render reliably). Uses
+    /// Unicode left-block partial fills (`▏▎▍▌▋▊▉█`) so anything > 0%
+    /// renders some colour — a plain `█`/`░` bar at `width=8` only lights
+    /// the first cell at ≥6.25 %, which made small percentages look like
+    /// "no fill" in the tray.
     func makeBar(pct: Double, width: Int) -> NSAttributedString {
         let clamped = max(0.0, min(100.0, pct))
-        let filled = Int((clamped / 100.0 * Double(width)).rounded())
-        let empty = max(0, width - filled)
+        // 8 sub-cells per visual cell → 8 partial-fill levels.
+        let totalEighths = Int((clamped / 100.0 * Double(width) * 8.0).rounded())
+        let fullCells = totalEighths / 8
+        let partialIdx = totalEighths % 8
+        let partials: [Character] = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
+
         let m = NSMutableAttributedString()
-        if filled > 0 {
-            m.append(NSAttributedString(string: String(repeating: "█", count: filled),
-                                         attributes: [.font: Self.barFont, .foregroundColor: barColor(pct)]))
+        let fillAttrs: [NSAttributedString.Key: Any] =
+            [.font: Self.barFont, .foregroundColor: barColor(pct)]
+        let emptyAttrs: [NSAttributedString.Key: Any] =
+            [.font: Self.barFont, .foregroundColor: NSColor.tertiaryLabelColor]
+
+        if fullCells > 0 {
+            m.append(NSAttributedString(string: String(repeating: "█", count: fullCells),
+                                         attributes: fillAttrs))
         }
-        if empty > 0 {
-            m.append(NSAttributedString(string: String(repeating: "░", count: empty),
-                                         attributes: [.font: Self.barFont, .foregroundColor: NSColor.tertiaryLabelColor]))
+        var emptyCount = width - fullCells
+        if partialIdx > 0 && fullCells < width {
+            m.append(NSAttributedString(string: String(partials[partialIdx]),
+                                         attributes: fillAttrs))
+            emptyCount -= 1
+        }
+        if emptyCount > 0 {
+            m.append(NSAttributedString(string: String(repeating: "░", count: emptyCount),
+                                         attributes: emptyAttrs))
         }
         return m
     }
