@@ -87,7 +87,7 @@ func blockTotalTokens(_ d: [String: Any]) -> Int {
 
 // Widget version, bumped manually each release. Compared against the
 // `tag_name` of the latest release fetched from the configured source.
-let WIDGET_VERSION = "0.5.4"
+let WIDGET_VERSION = "0.5.5"
 // Default update source. Overridable at runtime by ~/.cache/claude-usage-bar/update.json
 // — install.sh writes that file pointing at the distribution it came from
 // (GitHub Releases for the standalone repo, GitLab Releases for the
@@ -180,6 +180,11 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu = NSMenu()
         menu.delegate = self
+        // Parent toggles (Notifications / Usage alert / Compact mode) have
+        // no action — only a submenu. NSMenu's auto-enable logic disables
+        // such items when target validation fails, which makes the submenu
+        // refuse to open. Disable auto-enable; we manage validation ourselves.
+        menu.autoenablesItems = false
         detailItem.isEnabled = false
         setDetail(plain("Loading…"))
         menu.addItem(detailItem)
@@ -190,22 +195,18 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Display section — controls how the title looks in the menu bar
         // (bar + percent vs. compact provider-icon + percent).
         menu.addItem(menuSectionLabel("DISPLAY"))
-        compactToggleItem.target = self
-        compactToggleItem.action = #selector(toggleCompact)
+        // Submenu hangs off the parent (off + provider checkboxes) — same
+        // shape as Notifications / Usage alert, no separate "providers" row.
         menu.addItem(compactToggleItem)
-        menu.addItem(compactProvidersItem)
         menu.addItem(.separator())
         // Section label above the alerting block so it reads as its own
         // group rather than blending into the maintenance footer.
         menu.addItem(menuSectionLabel("ALERTS & NOTIFICATIONS"))
-        notifToggleItem.target = self
-        notifToggleItem.action = #selector(toggleNotif)
+        // Submenus hang off the parent toggles directly — clicking the
+        // parent opens the submenu (off / 30s / 60s / …) so off/on/delay
+        // all live in one place instead of as separate rows.
         menu.addItem(notifToggleItem)
-        menu.addItem(notifDelayItem)
-        alertToggleItem.target = self
-        alertToggleItem.action = #selector(toggleAlert)
         menu.addItem(alertToggleItem)
-        menu.addItem(alertThresholdItem)
         autostartToggleItem.target = self
         autostartToggleItem.action = #selector(toggleAutostart)
         menu.addItem(autostartToggleItem)
@@ -566,7 +567,10 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Rebuilds the alert toggle + thresholds submenu to match current state.
+    /// Rebuilds the usage-alert parent row + its hover submenu (off + each
+    /// threshold). Multi-select: any subset of thresholds may be enabled,
+    /// the `off` row clears them all. Triangle stays orange while at least
+    /// one threshold is on.
     func rebuildAlertItems() {
         let toggleLabel: String
         if alertEnabled && !alertThresholds.isEmpty {
@@ -576,18 +580,22 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             toggleLabel = "Usage alert  ·  off"
         }
         alertToggleItem.attributedTitle = menuToggleLabel(toggleLabel, active: alertEnabled)
-        // Bright orange triangle when active — eye-catching since this is
-        // the user's "wake me up at N%" signal; muted outline when off.
         alertToggleItem.image = tintedSymbol(
             name: alertEnabled ? "exclamationmark.triangle.fill" : "exclamationmark.triangle",
             color: alertEnabled ? NSColor.systemOrange : NSColor.tertiaryLabelColor
         )
 
-        let tiersStr = alertThresholds.sorted().map(String.init).joined(separator: "/")
-        alertThresholdItem.attributedTitle =
-            menuDetailLabel("Thresholds  (\(tiersStr.isEmpty ? "—" : tiersStr + "%"))")
-        alertThresholdItem.image = NSImage(systemSymbolName: "gauge.medium", accessibilityDescription: nil)
         let sub = NSMenu()
+        let offItem = NSMenuItem(
+            title: "",
+            action: #selector(pickAlertOff),
+            keyEquivalent: ""
+        )
+        offItem.target = self
+        let offMarker = (!alertEnabled || alertThresholds.isEmpty) ? "✓ " : "   "
+        offItem.attributedTitle = plain("\(offMarker)off")
+        sub.addItem(offItem)
+        sub.addItem(.separator())
         for n in ALERT_THRESHOLD_OPTIONS {
             let mi = NSMenuItem(
                 title: "",
@@ -600,17 +608,14 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             mi.attributedTitle = plain("\(marker)\(n)%")
             sub.addItem(mi)
         }
-        alertThresholdItem.submenu = sub
+        alertToggleItem.submenu = sub
     }
 
-    @objc func toggleAlert() {
-        alertEnabled.toggle()
-        // When re-enabling, treat the current window as un-alerted so the
-        // user gets a fresh chance to be notified at each enabled tier.
-        if alertEnabled {
-            alertedWindowResetsAt = nil
-            firedTiersInWindow = []
-        }
+    @objc func pickAlertOff() {
+        alertThresholds.removeAll()
+        alertEnabled = false
+        firedTiersInWindow = []
+        alertedWindowResetsAt = nil
         saveAlertConfig()
         rebuildAlertItems()
     }
@@ -754,9 +759,10 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         try? data.write(to: URL(fileURLWithPath: DISPLAY_CONFIG_PATH), options: .atomic)
     }
 
-    /// Refreshes the compact-mode toggle row + the providers submenu so they
-    /// match `compactMode` / `compactProviders`. Visually parallels the
-    /// notifications / usage-alert rows.
+    /// Refreshes the compact-mode parent row + its hover submenu (off +
+    /// per-provider checkboxes). Visually parallels the notifications /
+    /// usage-alert rows: pick a provider to enable compact mode at that
+    /// provider set, pick `off` to disable while keeping the selection.
     func rebuildCompactItems() {
         let selected = COMPACT_PROVIDER_ORDER
             .filter { compactProviders.contains($0) }
@@ -770,9 +776,16 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             color: compactMode ? NSColor.systemTeal : NSColor.tertiaryLabelColor
         )
 
-        compactProvidersItem.attributedTitle = menuDetailLabel("Show in compact")
-        compactProvidersItem.image = NSImage(systemSymbolName: "rectangle.3.group", accessibilityDescription: nil)
         let sub = NSMenu()
+        let offItem = NSMenuItem(
+            title: "",
+            action: #selector(pickCompactOff),
+            keyEquivalent: ""
+        )
+        offItem.target = self
+        offItem.attributedTitle = plain("\(compactMode ? "   " : "✓ ")off")
+        sub.addItem(offItem)
+        sub.addItem(.separator())
         for key in COMPACT_PROVIDER_ORDER {
             let mi = NSMenuItem(
                 title: "",
@@ -785,11 +798,11 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             mi.attributedTitle = plain("\(marker)\(key)")
             sub.addItem(mi)
         }
-        compactProvidersItem.submenu = sub
+        compactToggleItem.submenu = sub
     }
 
-    @objc func toggleCompact() {
-        compactMode.toggle()
+    @objc func pickCompactOff() {
+        compactMode = false
         saveDisplayConfig()
         rebuildCompactItems()
         refresh()
@@ -804,6 +817,9 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             compactProviders.insert(key)
         }
+        // Picking a provider auto-enables compact mode (mirrors alert's
+        // "any threshold ⇒ on" pattern); `off` is the way to disable.
+        compactMode = true
         saveDisplayConfig()
         rebuildCompactItems()
         refresh()
@@ -1200,10 +1216,11 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         try? data.write(to: URL(fileURLWithPath: ALERT_CONFIG_PATH), options: .atomic)
     }
 
-    /// Rebuilds the two notification menu items (top-level toggle + delay
-    /// submenu parent) so they match the state read from settings.json.
-    /// Called on every refresh, so external edits to settings.json show up
-    /// after the next poll.
+    /// Rebuilds the notifications parent row + its hover submenu (off + each
+    /// delay). Single-pick: selecting a delay turns notifications on at that
+    /// delay; selecting `off` disables them. Settings.json edits made
+    /// externally show up after the next poll since this is called on every
+    /// refresh.
     func rebuildNotifSubmenu() {
         let toggleLabel = notifEnabled
             ? "Notifications  ·  on  ·  \(notifDelay)s"
@@ -1214,9 +1231,16 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             color: notifEnabled ? NSColor.systemBlue : NSColor.tertiaryLabelColor
         )
 
-        notifDelayItem.attributedTitle = menuDetailLabel("Delay  (\(notifDelay)s)")
-        notifDelayItem.image = NSImage(systemSymbolName: "clock", accessibilityDescription: nil)
         let sub = NSMenu()
+        let offItem = NSMenuItem(
+            title: "",
+            action: #selector(pickNotifOff),
+            keyEquivalent: ""
+        )
+        offItem.target = self
+        offItem.attributedTitle = plain("\(notifEnabled ? "   " : "✓ ")off")
+        sub.addItem(offItem)
+        sub.addItem(.separator())
         for n in NOTIF_DELAY_OPTIONS {
             let mi = NSMenuItem(
                 title: "",
@@ -1229,15 +1253,11 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             mi.attributedTitle = plain("\(marker)\(n)s")
             sub.addItem(mi)
         }
-        notifDelayItem.submenu = sub
+        notifToggleItem.submenu = sub
     }
 
-    @objc func toggleNotif() {
-        let target = notifEnabled ? "off" : "on"
-        let args = target == "on"
-            ? ["set", "on", String(notifDelay)]
-            : ["set", "off"]
-        runNotifControl(args: args)
+    @objc func pickNotifOff() {
+        runNotifControl(args: ["set", "off"])
     }
 
     @objc func pickDelay(_ sender: NSMenuItem) {

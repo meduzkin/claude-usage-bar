@@ -7,14 +7,14 @@
 
 > macOS menu-bar widget for AI coding agents — desktop notifications when Claude Code blocks on a permission prompt, threshold alerts on usage windows, and unified usage bars across Claude / Codex / Gemini / Copilot.
 
-![claude-usage-bar dropdown](docs/screenshot.png?v=0.5.4)
+![claude-usage-bar dropdown](docs/screenshot.png?v=0.5.5)
 
 ## Notifications
 
-Two independent nudges, both opt-in from **ALERTS & NOTIFICATIONS** in the dropdown.
+Two independent nudges, both opt-in from **ALERTS & NOTIFICATIONS** in the dropdown. Each parent row carries one hover submenu — `off` plus the picker (delays for one, threshold tiers for the other) — so there are no separate "delay" / "thresholds" rows cluttering the menu.
 
-- **Permission prompt** — when Claude Code blocks on a confirmation (`Notification` / `Stop` / `PreToolUse` hooks), pops a macOS notification, plays a sound, and re-focuses your terminal if the wait exceeds your configured delay. Delay options: 30 / 60 / 120 / 300 s. Bell turns blue when on. Toggling only touches the three hooks the widget owns in `~/.claude/settings.json` — your other hooks stay.
-- **Usage threshold** — multi-select tiers 25 / 50 / 75 / 90 / 95 %. Each enabled tier fires once per 5-hour window the first time utilization crosses it, then re-arms on the next window. Triangle turns orange when on. State at `~/.cache/claude-usage-bar/alert.json`.
+- **Permission prompt** (`Notifications ▸`) — when Claude Code blocks on a confirmation (`Notification` / `Stop` / `PreToolUse` hooks), pops a macOS notification, plays a sound, and re-focuses your terminal if the wait exceeds your configured delay. Delay options: 30 / 60 / 120 / 300 s. Bell turns blue when on. Toggling only touches the three hooks the widget owns in `~/.claude/settings.json` — your other hooks stay.
+- **Usage threshold** (`Usage alert ▸`) — multi-select tiers 25 / 50 / 75 / 90 / 95 %. Each enabled tier fires once per 5-hour window the first time utilization crosses it, then re-arms on the next window. `off` clears them all. Triangle turns orange when on. State at `~/.cache/claude-usage-bar/alert.json`.
 
 ## At a glance
 
@@ -26,8 +26,7 @@ Right-click the icon to refresh without opening the dropdown.
 
 The **DISPLAY** group in the dropdown lets you swap the bar for a tighter `[provider icon] NN%` rendering — useful if you're tracking more than one assistant and want all of them visible in the menu bar at once.
 
-- `Compact mode` toggles the format. Provider icons keep their brand tint (Anthropic warm, OpenAI green, Gemini blue, Copilot purple).
-- `Show in compact ▸` selects which providers appear when compact mode is on — multi-select, with at least one always pinned. Headline percentage per provider: Claude / Codex 5-hour bucket; Gemini / Copilot the max across their parallel quotas.
+`Compact mode ▸` opens a single submenu — `off` plus the four providers (Claude / Codex / Gemini / Copilot) with checkmarks. Picking a provider enables compact mode and toggles that provider's icon into the title; `off` disables compact mode while keeping the provider selection. Provider icons render in their brand tint (Anthropic warm, OpenAI green, Gemini blue, Copilot purple). Headline percentage per provider: Claude / Codex 5-hour bucket; Gemini / Copilot the max across their parallel quotas.
 
 ## Dropdown
 
