@@ -2,7 +2,7 @@
 
 > macOS menu-bar widget for AI coding agents — desktop notifications when Claude Code blocks on a permission prompt, threshold alerts on usage windows, and unified usage bars across Claude / Codex / Gemini / Copilot.
 
-![claude-usage-bar dropdown](docs/screenshot.png)
+![claude-usage-bar dropdown](docs/screenshot.png?v=0.5.3)
 
 ## Notifications
 
