@@ -87,7 +87,7 @@ func blockTotalTokens(_ d: [String: Any]) -> Int {
 
 // Widget version, bumped manually each release. Compared against the
 // `tag_name` of the latest release fetched from the configured source.
-let WIDGET_VERSION = "0.5.2"
+let WIDGET_VERSION = "0.5.3"
 // Default update source. Overridable at runtime by ~/.cache/claude-usage-bar/update.json
 // — install.sh writes that file pointing at the distribution it came from
 // (GitHub Releases for the standalone repo, GitLab Releases for the
@@ -98,6 +98,18 @@ let DEFAULT_UPDATE_CONFIG: [String: String] = [
     "asset_name": "claude-usage-bar",
 ]
 let UPDATE_CONFIG_PATH = "\(NSHomeDirectory())/.cache/claude-usage-bar/update.json"
+// Tracks the last release tag we already notified the user about, so the
+// daily background check doesn't re-nag them about the same version.
+// Reset (delete the file) to force a fresh notification on next check.
+let UPDATE_CHECK_STATE_PATH = "\(NSHomeDirectory())/.cache/claude-usage-bar/update-check.json"
+// Background update poll cadence. 24h is enough — releases ship on the
+// order of days, and the GitHub Releases API is cheap (single GET, no
+// per-IP throttle that we'd hit at this rate).
+let UPDATE_CHECK_INTERVAL: TimeInterval = 24 * 3600
+// Delay before the first background check after launch. Keeps startup
+// quick and avoids stampeding the API if a bunch of widgets relaunch at
+// login at the same wall-clock minute.
+let UPDATE_CHECK_INITIAL_DELAY: TimeInterval = 60
 
 // Delay options offered in the notifications submenu (seconds).
 let NOTIF_DELAY_OPTIONS: [Int] = [30, 60, 120, 300]
@@ -118,6 +130,7 @@ let ALERT_CONFIG_PATH: String = {
 class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var timer: Timer?
+    var updateCheckTimer: Timer?
     var lastRefreshAt: Date = .distantPast
     var lastSuccessfulRefreshAt: Date = .distantPast
     let detailItem  = NSMenuItem(title: "Loading…", action: nil, keyEquivalent: "")
@@ -210,6 +223,7 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         refresh()
         scheduleTimer()
+        scheduleUpdateCheck()
     }
 
     /// (Re)installs the background refresh timer at the current
@@ -788,6 +802,65 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let info = self.fetchLatestRelease()
             DispatchQueue.main.async { self.handleUpdateInfo(info) }
         }
+    }
+
+    /// Daily background poll. First fire is delayed slightly so launch isn't
+    /// slowed and so simultaneous login-time launches across machines don't
+    /// stampede the API. Then repeats every `UPDATE_CHECK_INTERVAL`.
+    func scheduleUpdateCheck() {
+        updateCheckTimer?.invalidate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + UPDATE_CHECK_INITIAL_DELAY) { [weak self] in
+            self?.checkForUpdatesSilently()
+        }
+        updateCheckTimer = Timer.scheduledTimer(withTimeInterval: UPDATE_CHECK_INTERVAL, repeats: true) { [weak self] _ in
+            self?.checkForUpdatesSilently()
+        }
+    }
+
+    /// Background-friendly counterpart to `checkForUpdates`. Hits the same
+    /// release API but never opens a modal — on a newer release it posts a
+    /// macOS notification (via the same osascript path as usage alerts) and
+    /// records the tag at `UPDATE_CHECK_STATE_PATH` so we don't re-nag the
+    /// user about the same version. The user can still install via "Check
+    /// for updates…" in the dropdown (which fires the interactive flow).
+    func checkForUpdatesSilently() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self, let info = self.fetchLatestRelease() else { return }
+            let remote = info.tag.hasPrefix("v") ? String(info.tag.dropFirst()) : info.tag
+            guard self.compareVersions(remote, WIDGET_VERSION) > 0 else { return }
+            guard self.lastNotifiedUpdateTag() != info.tag else { return }
+            DispatchQueue.main.async {
+                self.sendNotification(
+                    title: "claude-usage-bar update available",
+                    body: "\(info.tag) is out — you're on \(WIDGET_VERSION). Click 'Check for updates…' in the dropdown to install."
+                )
+                self.recordNotifiedUpdateTag(info.tag)
+            }
+        }
+    }
+
+    /// Reads the last tag we already notified about, so a newer release
+    /// doesn't fire daily until the user updates (or uninstalls + reinstalls).
+    func lastNotifiedUpdateTag() -> String? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: UPDATE_CHECK_STATE_PATH)),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return obj["lastNotifiedTag"] as? String
+    }
+
+    /// Persists the tag we just notified the user about. Also stores a
+    /// timestamp purely for debugging — the tag is what gates re-firing.
+    func recordNotifiedUpdateTag(_ tag: String) {
+        let dir = (UPDATE_CHECK_STATE_PATH as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true, attributes: nil
+        )
+        let obj: [String: Any] = [
+            "lastNotifiedTag": tag,
+            "lastCheckedAt":   ISO8601DateFormatter().string(from: Date()),
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]) else { return }
+        try? data.write(to: URL(fileURLWithPath: UPDATE_CHECK_STATE_PATH), options: .atomic)
     }
 
     /// Resolves which release source to query (GitHub or GitLab) from

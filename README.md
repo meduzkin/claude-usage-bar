@@ -1,6 +1,6 @@
 # claude-usage-bar
 
-> macOS menu-bar widget for Claude Code. Pings you when Claude is waiting on a prompt, alerts when your 5-hour usage crosses a threshold, and keeps the rate-limit windows visible at a glance.
+> macOS menu-bar widget for AI coding agents — desktop notifications when Claude Code blocks on a permission prompt, threshold alerts on usage windows, and unified usage bars across Claude / Codex / Gemini / Copilot.
 
 ![claude-usage-bar dropdown](docs/screenshot.png)
 
