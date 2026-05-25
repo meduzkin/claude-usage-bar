@@ -1,6 +1,25 @@
+# Build artefacts
 *.dSYM/
 claude-usage-bar
 claude-usage-bar.arm64
 claude-usage-bar.x86_64
-cross-platform/__pycache__/
-cross-platform/*.pyc
+Claude Usage Bar.app/
+Claude-Usage-Bar.zip
+*.swiftmodule
+*.swiftdoc
+.build/
+
+# macOS Finder / resource-fork noise
+.DS_Store
+._*
+
+# Editor / IDE local state
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python (cross-platform/)
+__pycache__/
+*.pyc

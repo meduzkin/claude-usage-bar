@@ -17,4 +17,11 @@ rm -f "$ARM" "$X86"
 
 echo "built: $(pwd)/$OUT"
 file "$OUT"
-echo "run:   ./$OUT"
+
+# Wrap the bare binary in a .app bundle so it's launchable from
+# Finder/Spotlight/Launchpad. The bare binary stays at the repo root for
+# self-update and dev workflows; both ship in releases.
+./package-app.sh
+
+echo "run:   ./$OUT  (bare binary, dev mode)"
+echo "       open './Claude Usage Bar.app'  (bundle)"

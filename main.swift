@@ -12,7 +12,16 @@ final class OpaqueBackgroundView: NSView {
     }
 }
 
+// When running from a .app bundle, scripts live in Contents/Resources/.
+// When running as a bare binary (dev / install.sh --no-app), they sit
+// next to the executable. Check the bundle path first; fall back to the
+// executable's directory.
 let SCRIPT_PATH: String = {
+    if Bundle.main.bundlePath.hasSuffix(".app"),
+       let resourcePath = Bundle.main.resourcePath,
+       FileManager.default.fileExists(atPath: resourcePath + "/usage.sh") {
+        return resourcePath + "/usage.sh"
+    }
     let exe = Bundle.main.executablePath ?? CommandLine.arguments[0]
     return (exe as NSString).deletingLastPathComponent + "/usage.sh"
 }()
@@ -87,7 +96,7 @@ func blockTotalTokens(_ d: [String: Any]) -> Int {
 
 // Widget version, bumped manually each release. Compared against the
 // `tag_name` of the latest release fetched from the configured source.
-let WIDGET_VERSION = "0.5.5"
+let WIDGET_VERSION = "0.5.6"
 // Default update source. Overridable at runtime by ~/.cache/claude-usage-bar/update.json
 // — install.sh writes that file pointing at the distribution it came from
 // (GitHub Releases for the standalone repo, GitLab Releases for the
@@ -233,6 +242,7 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         loadAlertConfig()
         loadIntervalConfig()
         rebuildIntervalSubmenu()
+        migrateLaunchAgentIfStale()
         refreshAutostartState()
         rebuildAutostartItem()
         loadDisplayConfig()
@@ -691,7 +701,10 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
           <key>Label</key>           <string>\(LAUNCH_AGENT_LABEL)</string>
           <key>ProgramArguments</key><array><string>\(binary)</string></array>
           <key>RunAtLoad</key>       <true/>
-          <key>KeepAlive</key>       <true/>
+          <key>KeepAlive</key>
+          <dict>
+            <key>SuccessfulExit</key><false/>
+          </dict>
           <key>StandardOutPath</key> <string>/tmp/\(LAUNCH_AGENT_LABEL).log</string>
           <key>StandardErrorPath</key><string>/tmp/\(LAUNCH_AGENT_LABEL).log</string>
         </dict>
@@ -708,6 +721,25 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func disableAutostart() {
         runLaunchctl(args: ["unload", LAUNCH_AGENT_PLIST])
         try? FileManager.default.removeItem(atPath: LAUNCH_AGENT_PLIST)
+    }
+
+    /// Versions ≤ 0.5.5 wrote the LaunchAgent plist with a bare
+    /// `KeepAlive=true`, which made launchd respawn the widget even
+    /// after a user-requested Quit. New format keys keepalive on
+    /// non-zero exit only (`KeepAlive={SuccessfulExit=false}`), so
+    /// manual Quit stays quit and crashes still auto-recover.
+    ///
+    /// Called once at startup. If the on-disk plist still has the old
+    /// shape, rewrite it via `enableAutostart()` (idempotent, also
+    /// unload+reload so the new rule takes effect without a reboot).
+    func migrateLaunchAgentIfStale() {
+        guard FileManager.default.fileExists(atPath: LAUNCH_AGENT_PLIST),
+              let data = FileManager.default.contents(atPath: LAUNCH_AGENT_PLIST),
+              let body = String(data: data, encoding: .utf8) else { return }
+        let needsMigration = body.contains("<key>KeepAlive</key>")
+                          && !body.contains("SuccessfulExit")
+        guard needsMigration else { return }
+        enableAutostart()
     }
 
     /// Synchronously runs `launchctl <args>` and discards its output.
@@ -1772,8 +1804,8 @@ if CommandLine.arguments.contains("--headless") {
 }
 
 func runHeadless(asJSON: Bool) {
-    let exePath = Bundle.main.executablePath ?? CommandLine.arguments[0]
-    let scriptPath = (exePath as NSString).deletingLastPathComponent + "/usage.sh"
+    // Reuse SCRIPT_PATH so the bundle/bare-binary resolution stays in one place.
+    let scriptPath = SCRIPT_PATH
     let task = Process()
     task.launchPath = "/bin/bash"
     task.arguments = [scriptPath]

@@ -1,30 +1,36 @@
 #!/bin/bash
-# Installs the widget.
+# Installs the widget as a proper macOS .app bundle in ~/Applications/.
+# Finder, Spotlight and Launchpad pick it up by name.
 #
-# Three ways to get the binary:
-#   1. If `swiftc` is available (Xcode Command Line Tools) — build from
-#      source. Default for anyone with the toolchain.
-#   2. Else — download the pre-built universal binary from the GitHub
-#      Releases page of this repo. No swiftc needed.
-#   3. With `--build` to force a rebuild even if a fresh binary is
-#      already present; with `--download` to skip building and pull the
-#      release artifact unconditionally.
+# Three ways to obtain the bundle:
+#   1. `swiftc` available (Xcode Command Line Tools) — build from source.
+#      Default when the toolchain is present.
+#   2. Else — download the pre-built bundle zip from the GitHub Releases
+#      page of this repo. No swiftc needed.
+#   3. With `--build` to force a rebuild; with `--download` to skip
+#      building and pull the release artefact unconditionally.
 #
 # On request, registers a LaunchAgent so the widget starts at login.
 # Idempotent: safe to re-run.
 #
 # Flags:
 #   --autostart   skip the prompt and install the LaunchAgent
-#   --build       force a rebuild even if the binary is already there
-#   --download    skip building, fetch the release artifact
+#   --build       force a rebuild even if a fresh bundle is already there
+#   --download    skip building, fetch the release artefact
 
 set -euo pipefail
 cd "$(dirname "$0")"
 HERE=$(pwd -P)
-BIN="$HERE/claude-usage-bar"
+BIN_LOCAL="$HERE/claude-usage-bar"
+APP_NAME="Claude Usage Bar.app"
+APP_LOCAL="$HERE/$APP_NAME"
+APPS_DIR="$HOME/Applications"
+APP_INSTALLED="$APPS_DIR/$APP_NAME"
+APP_BIN_INSTALLED="$APP_INSTALLED/Contents/MacOS/claude-usage-bar"
 LABEL="com.local.claude-usage-bar"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-RELEASE_URL="https://github.com/meduzkin/claude-usage-bar/releases/latest/download/claude-usage-bar"
+RELEASE_URL_BIN="https://github.com/meduzkin/claude-usage-bar/releases/latest/download/claude-usage-bar"
+RELEASE_URL_ZIP="https://github.com/meduzkin/claude-usage-bar/releases/latest/download/Claude-Usage-Bar.zip"
 
 autostart=0
 force_build=0
@@ -55,7 +61,7 @@ if ! command -v npx >/dev/null 2>&1 && ! command -v ccusage >/dev/null 2>&1; the
   missing+=("npx or ccusage — install Node.js (or 'npm i -g ccusage') for cost data")
 fi
 if [ "$force_download" -eq 1 ] && ! command -v curl >/dev/null 2>&1; then
-  missing+=("curl — required to download the release artifact")
+  missing+=("curl — required to download the release artefact")
 fi
 
 echo "==> verifying keychain access (you may see a macOS password prompt)"
@@ -85,23 +91,46 @@ fi
 
 if [ "$mode" = "build" ]; then
   if ! command -v swiftc >/dev/null 2>&1; then
-    echo "missing swiftc — run: xcode-select --install (or re-run without --build to download a pre-built binary)" >&2
+    echo "missing swiftc — run: xcode-select --install (or re-run without --build to download a pre-built bundle)" >&2
     exit 1
   fi
-  echo "==> building from source"
+  echo "==> building from source (produces bare binary + .app bundle)"
   ./build.sh
 else
   if ! command -v curl >/dev/null 2>&1; then
-    echo "missing curl — cannot fetch release artifact" >&2; exit 1
+    echo "missing curl — cannot fetch release artefact" >&2; exit 1
   fi
-  echo "==> downloading pre-built binary from $RELEASE_URL"
-  if ! curl -fsSL "$RELEASE_URL" -o "$BIN"; then
+  echo "==> downloading pre-built bundle from $RELEASE_URL_ZIP"
+  TMPZIP=$(mktemp -t cub.XXXXXX.zip)
+  TMPDIR_EXTRACT=$(mktemp -d -t cub.XXXXXX)
+  trap 'rm -rf "$TMPZIP" "$TMPDIR_EXTRACT"' EXIT
+  if ! curl -fsSL "$RELEASE_URL_ZIP" -o "$TMPZIP"; then
     echo "download failed. Check the URL or run with --build if you have swiftc." >&2
-    rm -f "$BIN"; exit 1
+    exit 1
   fi
-  chmod +x "$BIN"
-  echo "    written: $BIN"
+  unzip -q "$TMPZIP" -d "$TMPDIR_EXTRACT"
+  if [ ! -d "$TMPDIR_EXTRACT/$APP_NAME" ]; then
+    echo "extracted archive doesn't contain '$APP_NAME'" >&2; exit 1
+  fi
+  rm -rf "$APP_LOCAL"
+  mv "$TMPDIR_EXTRACT/$APP_NAME" "$APP_LOCAL"
+  # Also fetch the bare binary so the dev workflow `./claude-usage-bar`
+  # keeps working from the repo dir.
+  if curl -fsSL "$RELEASE_URL_BIN" -o "$BIN_LOCAL" 2>/dev/null; then
+    chmod +x "$BIN_LOCAL"
+  fi
+  echo "    written: $APP_LOCAL"
 fi
+
+# Install the bundle into ~/Applications/ where Spotlight/Finder index it.
+mkdir -p "$APPS_DIR"
+rm -rf "$APP_INSTALLED"
+cp -R "$APP_LOCAL" "$APP_INSTALLED"
+# Strip quarantine just in case (no-op for curl-fetched files; safety
+# net for users who hand-dropped a downloaded .app and then ran us).
+xattr -dr com.apple.quarantine "$APP_INSTALLED" 2>/dev/null || true
+echo "==> installed bundle: $APP_INSTALLED"
+echo "    launchable from Spotlight, Finder and Launchpad as 'Claude Usage Bar'"
 
 # Deploy notification hook scripts to ~/.claude/scripts/ so the widget's
 # "notifications" toggle has something to enable. Files are stateless and
@@ -142,9 +171,12 @@ if [ "$autostart" -eq 1 ]; then
 <plist version="1.0">
 <dict>
   <key>Label</key>           <string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$BIN</string></array>
+  <key>ProgramArguments</key><array><string>$APP_BIN_INSTALLED</string></array>
   <key>RunAtLoad</key>       <true/>
-  <key>KeepAlive</key>       <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
   <key>StandardOutPath</key> <string>/tmp/$LABEL.log</string>
   <key>StandardErrorPath</key><string>/tmp/$LABEL.log</string>
 </dict>
@@ -157,5 +189,5 @@ EOF
 else
   echo ""
   echo "==> not autostarting. To run manually:"
-  echo "    $BIN &"
+  echo "    open '$APP_INSTALLED'"
 fi

@@ -7,7 +7,7 @@
 
 > macOS menu-bar widget for AI coding agents — desktop notifications when Claude Code blocks on a permission prompt, threshold alerts on usage windows, and unified usage bars across Claude / Codex / Gemini / Copilot.
 
-![claude-usage-bar dropdown](docs/screenshot.png?v=0.5.5)
+![claude-usage-bar dropdown](docs/screenshot.png?v=0.5.6)
 
 ## Notifications
 
@@ -54,6 +54,10 @@ Sonnet     ░░░░░░░░░░░░     0.0%
 
 ## Install
 
+Two routes. The first is recommended — it installs the `.app` into `~/Applications/` (Spotlight-, Finder- and Launchpad-launchable as **Claude Usage Bar**) and avoids the macOS quarantine prompt entirely.
+
+### A. Via `install.sh` (recommended)
+
 ```bash
 git clone https://github.com/meduzkin/claude-usage-bar.git
 cd claude-usage-bar
@@ -64,18 +68,36 @@ That:
 
 1. Checks prerequisites (`python3`, `jq`, `npx`/`ccusage`, plus `curl` or `swiftc` depending on path) and exits with a clear error if anything is missing.
 2. Triggers the macOS keychain prompt so you can click **Always Allow** during install rather than at first widget launch.
-3. Gets the binary one of two ways:
-   - **`swiftc` available** (Xcode Command Line Tools installed) → builds a universal binary from source.
-   - **`swiftc` not available** → downloads the pre-built universal binary from this repo's [latest GitHub Release](https://github.com/meduzkin/claude-usage-bar/releases/latest).
-4. Optionally registers a LaunchAgent at `~/Library/LaunchAgents/com.local.claude-usage-bar.plist` so the widget starts at login.
+3. Gets the bundle one of two ways:
+   - **`swiftc` available** (Xcode Command Line Tools installed) → builds the universal binary from source and packages a `.app` bundle.
+   - **`swiftc` not available** → downloads the pre-built `Claude-Usage-Bar.zip` from this repo's [latest GitHub Release](https://github.com/meduzkin/claude-usage-bar/releases/latest).
+4. Copies the `.app` into `~/Applications/` (no `sudo` required). Because the download path uses `curl`, the bundle never picks up macOS's quarantine attribute — Gatekeeper stays out of the way.
+5. Optionally registers a LaunchAgent at `~/Library/LaunchAgents/com.local.claude-usage-bar.plist` so the widget starts at login.
 
 Flags:
 
 - `./install.sh --autostart` — non-interactive, installs the LaunchAgent without prompting.
 - `./install.sh --build` — force build from source (requires `swiftc`).
-- `./install.sh --download` — skip building, always pull the release artifact.
+- `./install.sh --download` — skip building, always pull the release artefact.
 
-To remove: `./uninstall.sh` (stops the widget and removes the LaunchAgent; the binary and keychain ACL stay).
+### B. Direct `.app` download
+
+Grab `Claude-Usage-Bar.zip` from the [latest GitHub Release](https://github.com/meduzkin/claude-usage-bar/releases/latest), unzip, drag **Claude Usage Bar.app** into `~/Applications/` (or `/Applications/`), double-click to launch.
+
+The bundle is ad-hoc signed (free, no Apple Developer ID), so on **first launch** macOS Gatekeeper will refuse it because it was downloaded via a browser (quarantine attribute set). One-time unblock:
+
+- **macOS 14 (Sonoma) and earlier** — right-click the app → **Open** → **Open** in the dialog.
+- **macOS 15 (Sequoia) and later** — open **System Settings → Privacy & Security**, scroll to the bottom, click **Open Anyway** next to the "Claude Usage Bar was blocked…" line, then re-launch.
+
+After that, macOS remembers the approval and subsequent launches are silent. If you'd prefer a single command instead, this strips the quarantine attribute directly:
+
+```bash
+xattr -dr com.apple.quarantine ~/Applications/Claude\ Usage\ Bar.app
+```
+
+This route does **not** wire up a LaunchAgent or deploy the notification hook scripts — for those, run `./install.sh` after dropping the app in, or you can just live without autostart / hooks.
+
+To remove: `./uninstall.sh` (stops the widget, removes the LaunchAgent, and deletes the installed bundle; the keychain ACL and your source repo stay).
 
 ## Requirements
 
@@ -86,7 +108,7 @@ To remove: `./uninstall.sh` (stops the widget and removes the LaunchAgent; the b
 - `node` / `npx` on `PATH` (for [`ccusage`](https://www.npmjs.com/package/ccusage); a globally installed `ccusage` is preferred and faster)
 - One of:
   - **Swift toolchain** (`xcode-select --install`) — for `install.sh` to build from source. About 1 GB on disk; the install itself takes a couple of seconds after the toolchain is in place.
-  - **`curl`** — for `install.sh` to download the pre-built universal binary from the [latest GitHub Release](https://github.com/meduzkin/claude-usage-bar/releases/latest). No Xcode needed.
+  - **`curl`** + **`unzip`** — for `install.sh` to download the pre-built `.app` bundle from the [latest GitHub Release](https://github.com/meduzkin/claude-usage-bar/releases/latest). No Xcode needed.
 
 ## How auth works
 
@@ -106,7 +128,7 @@ For headless / CI setups, set `CLAUDE_CREDS=/path/to/file` and `usage.sh` reads 
 - Successful API responses are cached at `~/.cache/claude-usage-bar/oauth.json`. The endpoint rate-limits aggressively (429s within a few requests per minute), so on failure the widget falls back to the cached response — the bars stay visible even when the endpoint refuses to talk to us.
 - On a `401` `usage.sh` re-reads from keychain and retries once, in case Claude Code rotated the token.
 - **`main.swift`** — Cocoa app with `NSStatusItem`, refreshes every `refresh interval` minutes (user-configurable from the dropdown; default 10) **plus** every time you open the dropdown (with a 30-second cooldown to avoid spamming the rate-limited endpoint). Each row in the data section is wrapped in a custom `NSView` with an opaque background so the dropdown reads more solidly than the default vibrancy material.
-- **`build.sh`** — produces a universal binary (`swiftc` + `lipo` over arm64 and x86_64 slices, target `macos12`).
+- **`build.sh`** — produces a universal binary (`swiftc` + `lipo` over arm64 and x86_64 slices, target `macos12`), then `package-app.sh` wraps it into a `Claude Usage Bar.app` bundle (`Info.plist` with `LSUIElement`, scripts under `Contents/Resources/`, ad-hoc `codesign`).
 - **Single-instance guard** — on launch the GUI process acquires a BSD `flock(LOCK_EX | LOCK_NB)` on `~/.cache/claude-usage-bar/widget.lock`. A second launch (LaunchAgent + manual run, a self-update that didn't terminate the prior process, a Finder double-click) sees the lock and exits cleanly. The kernel auto-releases on process death, so stale lock files never wedge future launches. `--headless` bypasses the lock.
 
 ## Claude Code statusline
@@ -171,7 +193,7 @@ The text form is a single line, suitable for prompt-PS1 use or grepping. The JSO
 
 - The `/api/oauth/usage` endpoint is throttled. The background refresh interval is user-configurable (5/10/15/20/30 min; default 10) and the dropdown on-open refresh is gated by a 30-second cooldown. If you hit a 429 anyway, the widget shows cached values until the next successful call.
 - `ccusage` cost figures are estimates from local JSONL session files and won't exactly match Anthropic's internal billing.
-- No notarization / code signing — macOS Gatekeeper may warn on first launch if the binary was downloaded as a zip (cloning via git is fine, no quarantine attribute is set).
+- No paid Apple Developer ID / notarization — the `.app` bundle is only ad-hoc signed. macOS Gatekeeper warns on first launch of a browser-downloaded copy; see [direct `.app` install instructions](#b-direct-app-download) for the one-time unblock. The `install.sh` path uses `curl` (no quarantine), so that route stays one-step.
 
 ## Disclaimer
 

@@ -1,0 +1,68 @@
+name: release
+
+# Fires on tag push (`git tag v0.5.6 && git push origin v0.5.6`). Builds
+# the universal binary + .app bundle, then publishes both as assets on
+# the matching GitHub Release.
+#
+# The bare binary is what the in-widget self-update fetches (via
+# update.json's `asset_name`); the zip is what users grab when they
+# install via direct download from the Releases page.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # needed to create/edit the Release
+
+jobs:
+  build-and-release:
+    name: Build artefacts and attach to Release
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          swiftc --version
+          xcodebuild -version
+
+      - name: Build universal binary and package .app
+        run: ./build.sh
+
+      - name: Verify artefacts
+        run: |
+          file claude-usage-bar
+          lipo -info claude-usage-bar
+          test -x claude-usage-bar
+          test -x "Claude Usage Bar.app/Contents/MacOS/claude-usage-bar"
+          test -f "Claude Usage Bar.app/Contents/Info.plist"
+          test -f "Claude Usage Bar.app/Contents/Resources/usage.sh"
+          test -f "Claude Usage Bar.app/Contents/Resources/notif.sh"
+          codesign --verify --verbose "Claude Usage Bar.app"
+
+      - name: Cross-check binary version matches tag
+        run: |
+          tag="${GITHUB_REF##*/}"            # v0.5.6
+          ver="${tag#v}"                     # 0.5.6
+          src_ver=$(grep '^let WIDGET_VERSION' main.swift | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$src_ver" != "$ver" ]; then
+            echo "tag $tag does not match WIDGET_VERSION $src_ver in main.swift" >&2
+            exit 1
+          fi
+
+      - name: Zip the bundle
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent "Claude Usage Bar.app" Claude-Usage-Bar.zip
+
+      - name: Publish Release with assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            claude-usage-bar
+            Claude-Usage-Bar.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

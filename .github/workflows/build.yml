@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   swift-build:
-    name: Universal binary build
+    name: Universal binary + .app bundle
     runs-on: macos-14
     timeout-minutes: 10
     steps:
@@ -21,16 +21,30 @@ jobs:
           swift --version
           swiftc --version
           xcodebuild -version
-      - name: Build universal binary
+      - name: Build universal binary and package .app
         run: ./build.sh
-      - name: Verify artifact
+      - name: Verify artefacts
         run: |
           file claude-usage-bar
           lipo -info claude-usage-bar
           test -x claude-usage-bar
-      - name: Upload binary
+          test -x "Claude Usage Bar.app/Contents/MacOS/claude-usage-bar"
+          test -f "Claude Usage Bar.app/Contents/Info.plist"
+          test -f "Claude Usage Bar.app/Contents/Resources/usage.sh"
+          test -f "Claude Usage Bar.app/Contents/Resources/notif.sh"
+          codesign --verify --verbose "Claude Usage Bar.app"
+      - name: Zip the bundle
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent "Claude Usage Bar.app" Claude-Usage-Bar.zip
+      - name: Upload bare binary
         uses: actions/upload-artifact@v4
         with:
           name: claude-usage-bar-${{ github.sha }}
           path: claude-usage-bar
+          retention-days: 7
+      - name: Upload bundle zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Claude-Usage-Bar-${{ github.sha }}-app
+          path: Claude-Usage-Bar.zip
           retention-days: 7
