@@ -30,8 +30,16 @@ jobs:
           swiftc --version
           xcodebuild -version
 
+      - name: Script tests (sessions.sh, notification hooks, jira.py)
+        run: |
+          /bin/bash tests/test_sessions.sh
+          /bin/bash tests/test_jira.sh
+
       - name: Build universal binary and package .app
         run: ./build.sh
+
+      - name: Self-test (session logic)
+        run: ./claude-usage-bar --self-test
 
       - name: Verify artefacts
         run: |
@@ -42,6 +50,8 @@ jobs:
           test -f "Claude Usage Bar.app/Contents/Info.plist"
           test -f "Claude Usage Bar.app/Contents/Resources/usage.sh"
           test -f "Claude Usage Bar.app/Contents/Resources/notif.sh"
+          test -f "Claude Usage Bar.app/Contents/Resources/sessions.sh"
+          test -f "Claude Usage Bar.app/Contents/Resources/jira.py"
           codesign --verify --verbose "Claude Usage Bar.app"
 
       - name: Cross-check binary version matches tag

@@ -17,6 +17,8 @@
 #                        /tmp/claude-notify-last.json.
 
 DELAY="${1:-${CLAUDE_NOTIFY_DELAY:-60}}"
+OSASCRIPT="${CLAUDE_NOTIFY_OSASCRIPT:-osascript}"   # overridable for tests
+PENDING_DIR="${CLAUDE_NOTIFY_PENDING_DIR:-/tmp}"
 INPUT=$(cat)
 
 [ "$CLAUDE_NOTIFY_DEBUG" = "1" ] && echo "$INPUT" > /tmp/claude-notify-last.json
@@ -27,7 +29,7 @@ TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // ""' 2>/dev/null)
 NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // ""' 2>/dev/null)
 
 # GC: remove pidfiles whose process is dead (left over from killed/exited claude sessions)
-for f in /tmp/claude-notify-pending-*.pid; do
+for f in "$PENDING_DIR"/claude-notify-pending-*.pid; do
   [ -f "$f" ] || continue
   pid=$(cat "$f" 2>/dev/null)
   if [ -n "$pid" ] && ! ps -p "$pid" >/dev/null 2>&1; then
@@ -48,7 +50,12 @@ if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
 fi
 [ -z "$TOPIC" ] && TOPIC="Claude is waiting"
 
-PIDFILE="/tmp/claude-notify-pending-${SESSION_ID}.pid"
+PIDFILE="$PENDING_DIR/claude-notify-pending-${SESSION_ID}.pid"
+
+# "Waiting on you" marker for the widget's SESSIONS list (read by sessions.sh).
+# Unlike the pidfile it stays after the notification fires, and only
+# claude-notify-cancel.sh (Stop / PreToolUse, i.e. you answered) removes it.
+date +%s > "$PENDING_DIR/claude-waiting-${SESSION_ID}"
 
 # Cancel any previous pending push
 if [ -f "$PIDFILE" ]; then
@@ -75,11 +82,26 @@ case "$TERM_PROGRAM" in
   *)                APP="Terminal" ;;
 esac
 
+# Title names the session and its task, so with several sessions open you
+# know which one to switch to: "Claude Code · aws-terraform-29 · IT-18639".
+# The session name comes from `claude agents --json`, the task from the
+# optional per-session record in $CLAUDE_SESSIONS_META_DIR (see sessions.sh).
+# Resolved after the delay, inside the background job, so the hook returns at once.
+META_DIR="${CLAUDE_SESSIONS_META_DIR:-$HOME/.cache/claude-sessions}"
+session_title() {
+  local name task
+  name=$("${CLAUDE_BIN:-claude}" agents --json 2>/dev/null |
+         jq -r --arg id "$SESSION_ID" '.[] | select((.sessionId // .id) == $id) | .name' 2>/dev/null | head -1)
+  task=$(jq -r '.task // empty' "$META_DIR/$SESSION_ID.json" 2>/dev/null)
+  printf '%s' "Claude Code${name:+ · $name}${task:+ · $task}"
+}
+
 (
   sleep "$DELAY"
   [ -f "$PIDFILE" ] || exit 0
-  osascript -e "display notification \"$B\" with title \"$T\" subtitle \"$S\" sound name \"Glass\"" 2>/dev/null
-  osascript -e "tell application \"$APP\" to activate" 2>/dev/null
+  T=$(escape_as "$(session_title)")
+  "$OSASCRIPT" -e "display notification \"$B\" with title \"$T\" subtitle \"$S\" sound name \"Glass\"" 2>/dev/null
+  "$OSASCRIPT" -e "tell application \"$APP\" to activate" 2>/dev/null
   rm -f "$PIDFILE"
 ) &
 

@@ -10,8 +10,16 @@ ARM="claude-usage-bar.arm64"
 X86="claude-usage-bar.x86_64"
 OUT="claude-usage-bar"
 
-swiftc -O -target arm64-apple-macos12  main.swift -o "$ARM"
-swiftc -O -target x86_64-apple-macos12 main.swift -o "$X86"
+# Scripts the binary must be able to restore by itself: self-update replaces
+# only the binary, so a 0.5.x install has no sessions.sh in Resources and the
+# old notification hooks. They are embedded as string literals.
+./embed-scripts.sh > EmbeddedScripts.swift
+SOURCES="main.swift Sessions.swift EmbeddedScripts.swift"
+
+# shellcheck disable=SC2086
+swiftc -O -target arm64-apple-macos12  $SOURCES -o "$ARM"
+# shellcheck disable=SC2086
+swiftc -O -target x86_64-apple-macos12 $SOURCES -o "$X86"
 lipo -create -output "$OUT" "$ARM" "$X86"
 rm -f "$ARM" "$X86"
 

@@ -55,7 +55,7 @@ if ! command -v python3 >/dev/null 2>&1; then
   missing+=("python3 — required for JSON parsing in usage.sh")
 fi
 if ! command -v jq >/dev/null 2>&1; then
-  missing+=("jq — required by the notification hook scripts (brew install jq)")
+  missing+=("jq — required by the notification hooks and the session list (brew install jq)")
 fi
 if ! command -v npx >/dev/null 2>&1 && ! command -v ccusage >/dev/null 2>&1; then
   missing+=("npx or ccusage — install Node.js (or 'npm i -g ccusage') for cost data")

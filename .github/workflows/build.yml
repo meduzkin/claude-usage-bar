@@ -21,8 +21,19 @@ jobs:
           swift --version
           swiftc --version
           xcodebuild -version
+      - name: Script tests (sessions.sh, notification hooks, jira.py)
+        run: |
+          /bin/bash tests/test_sessions.sh
+          /bin/bash tests/test_jira.sh
       - name: Build universal binary and package .app
         run: ./build.sh
+      - name: Self-test (session logic)
+        run: ./claude-usage-bar --self-test
+      - name: Render the dropdown from demo fixtures
+        run: |
+          tests/make-preview-fixtures.sh "$RUNNER_TEMP/fx"
+          ./claude-usage-bar --render-preview "$RUNNER_TEMP/preview.png" --usage "$RUNNER_TEMP/fx/usage.json" --sessions "$RUNNER_TEMP/fx/sessions.json"
+          test "$(stat -f %z "$RUNNER_TEMP/preview.png")" -gt 20000
       - name: Verify artefacts
         run: |
           file claude-usage-bar
@@ -32,10 +43,18 @@ jobs:
           test -f "Claude Usage Bar.app/Contents/Info.plist"
           test -f "Claude Usage Bar.app/Contents/Resources/usage.sh"
           test -f "Claude Usage Bar.app/Contents/Resources/notif.sh"
+          test -f "Claude Usage Bar.app/Contents/Resources/sessions.sh"
+          test -f "Claude Usage Bar.app/Contents/Resources/jira.py"
           codesign --verify --verbose "Claude Usage Bar.app"
       - name: Zip the bundle
         run: |
           ditto -c -k --sequesterRsrc --keepParent "Claude Usage Bar.app" Claude-Usage-Bar.zip
+      - name: Upload preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-${{ github.sha }}
+          path: ${{ runner.temp }}/preview.png
+          retention-days: 7
       - name: Upload bare binary
         uses: actions/upload-artifact@v4
         with:

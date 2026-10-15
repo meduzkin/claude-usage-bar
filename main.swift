@@ -53,7 +53,13 @@ let PACE_MIN_ELAPSED_FRACTION: Double = 0.03
 /// Fixed content width for the dropdown body. Sized to fit the
 /// "Session [bar] 77.0% · 1h 17m" + pace-line full width without
 /// wrapping in semibold monospaced font.
-let CONTENT_WIDTH: CGFloat = 320
+/// 380 since v0.6: at 320 the Session/Weekly rows wrapped their reset
+/// time onto a second line (seen in --render-preview), and the TODAY row
+/// needs room for "Logged [bar] 6h 15m / 8h 00m · 5 tasks".
+let CONTENT_WIDTH: CGFloat = 380
+/// v0.6: only Claude's block is drawn in the root; the other providers are
+/// one row each. Kept as a switch so the old all-blocks layout is one edit away.
+let SHOW_ALL_PROVIDER_BLOCKS = false
 
 func shortModel(_ raw: String) -> String {
     // claude-opus-4-7 -> opus-4.7
@@ -96,7 +102,7 @@ func blockTotalTokens(_ d: [String: Any]) -> Int {
 
 // Widget version, bumped manually each release. Compared against the
 // `tag_name` of the latest release fetched from the configured source.
-let WIDGET_VERSION = "0.5.6"
+let WIDGET_VERSION = "0.6.0"
 // Default update source. Overridable at runtime by ~/.cache/claude-usage-bar/update.json
 // — install.sh writes that file pointing at the distribution it came from
 // (GitHub Releases for the standalone repo, GitLab Releases for the
@@ -143,8 +149,40 @@ let ALERT_CONFIG_PATH: String = {
 }()
 
 class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    var statusItem: NSStatusItem!
+    /// nil in `--render-preview` mode, where nothing goes to the menu bar.
+    var statusItem: NSStatusItem?
     var timer: Timer?
+    var previewMode = false
+
+    // v0.6: sessions, today, tray title parts
+    var sessionsTimer: Timer?
+    var sessions: [AgentSession] = []
+    var today: TodayInfo?
+    var busyTracker = BusyTracker()
+    var finishNotifyMinutes = DEFAULT_FINISH_NOTIFY_MINUTES
+    var dailyTargetHours = DEFAULT_DAILY_TARGET_HOURS
+    var sessionsHeaderItem: NSMenuItem?
+    var sessionRowItems: [NSMenuItem] = []
+    var todayItem: NSMenuItem?
+    let usageItem = NSMenuItem(title: "Claude", action: nil, keyEquivalent: "")
+    var providerRowItems: [NSMenuItem] = []
+    let finishNotifyItem = NSMenuItem(title: "session finished", action: nil, keyEquivalent: "")
+    let dailyTargetItem  = NSMenuItem(title: "daily target",     action: nil, keyEquivalent: "")
+    let settingsItem     = NSMenuItem(title: "Settings",         action: nil, keyEquivalent: "")
+    /// Usage part of the menu-bar title (bar + %, or compact icons), set by render(payload:).
+    var usageTitle = NSAttributedString(string: "claude …")
+    var usageTooltip: String?
+    /// What is in the menu bar now: waiting badge + usageTitle.
+    var trayTitle = NSAttributedString(string: "claude …")
+    var lastPayload: [String: Any]?
+    // v0.6: optional built-in Jira
+    var rawSessions: [AgentSession] = []
+    var metaToday: TodayInfo?
+    var jiraConfig = JiraConfig.load()
+    var jiraResult: JiraResult?
+    var jiraTimer: Timer?
+    var lastJiraKeys: Set<String> = []
+    let jiraItem = NSMenuItem(title: "Jira", action: nil, keyEquivalent: "")
     var updateCheckTimer: Timer?
     var lastRefreshAt: Date = .distantPast
     var lastSuccessfulRefreshAt: Date = .distantPast
@@ -176,17 +214,31 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var menu: NSMenu!  // stored so right-click handler can pop it up manually
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "claude …"
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = item
+        item.button?.title = "claude …"
 
         // Custom click handling: left-click pops up the menu, right-click
         // triggers a refresh in place. The menu is NOT attached to the
         // status item (we'd lose the right-click hook); we pop it up
         // ourselves via `popUp(positioning:at:in:)` on left-click.
-        statusItem.button?.target = self
-        statusItem.button?.action = #selector(statusItemClicked(_:))
-        statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        item.button?.target = self
+        item.button?.action = #selector(statusItemClicked(_:))
+        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
+        for path in ensureSupportScripts() { NSLog("claude-usage-bar: updated %@", path) }
+        buildMenu()
+        refresh()
+        refreshSessions()
+        scheduleTimer()
+        scheduleSessionsTimer()
+        scheduleJiraTimer()
+        scheduleUpdateCheck()
+    }
+
+    /// Builds the dropdown: SESSIONS, TODAY, USAGE, details, Settings ▸ and
+    /// the maintenance footer. Shared by the app and `--render-preview`.
+    func buildMenu() {
         menu = NSMenu()
         menu.delegate = self
         // Parent toggles (Notifications / Usage alert / Compact mode) have
@@ -194,46 +246,64 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // such items when target validation fails, which makes the submenu
         // refuse to open. Disable auto-enable; we manage validation ourselves.
         menu.autoenablesItems = false
+
+        // Root menu stays light: SESSIONS shows only sessions that need you
+        // (waiting / busy) plus one "N idle ›" row; Today and Usage are one
+        // summary row each, with the full blocks in their submenus.
+        let sessionsHeader = menuSectionLabel("SESSIONS")
+        sessionsHeader.isHidden = true
+        sessionsHeaderItem = sessionsHeader
+        menu.addItem(sessionsHeader)
+        menu.addItem(.separator())
+
+        // Claude: the full block (Session / Weekly bars, pace) and `details ›`
+        // right in the root. Other agents follow as one row each with their
+        // buckets in a submenu (rebuildProviderRows), then Jira last.
         detailItem.isEnabled = false
         setDetail(plain("Loading…"))
         menu.addItem(detailItem)
-        menu.addItem(.separator())
         detailsSubItem.isHidden = true
         menu.addItem(detailsSubItem)
         menu.addItem(.separator())
-        // Display section — controls how the title looks in the menu bar
-        // (bar + percent vs. compact provider-icon + percent).
-        menu.addItem(menuSectionLabel("DISPLAY"))
-        // Submenu hangs off the parent (off + provider checkboxes) — same
-        // shape as Notifications / Usage alert, no separate "providers" row.
-        menu.addItem(compactToggleItem)
+
+        let todayRow = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        todayRow.isHidden = true
+        todayItem = todayRow
+        menu.addItem(todayRow)
         menu.addItem(.separator())
-        // Section label above the alerting block so it reads as its own
-        // group rather than blending into the maintenance footer.
-        menu.addItem(menuSectionLabel("ALERTS & NOTIFICATIONS"))
-        // Submenus hang off the parent toggles directly — clicking the
-        // parent opens the submenu (off / 30s / 60s / …) so off/on/delay
-        // all live in one place instead of as separate rows.
-        menu.addItem(notifToggleItem)
-        menu.addItem(alertToggleItem)
+
+        // All settings live under one row so the root menu stays short.
+        let settings = NSMenu()
+        settings.autoenablesItems = false
+        settings.addItem(menuSectionLabel("DISPLAY"))
+        settings.addItem(compactToggleItem)
+        settings.addItem(.separator())
+        settings.addItem(menuSectionLabel("ALERTS & NOTIFICATIONS"))
+        settings.addItem(notifToggleItem)
+        settings.addItem(finishNotifyItem)
+        settings.addItem(alertToggleItem)
+        settings.addItem(.separator())
+        settings.addItem(jiraItem)
+        settings.addItem(dailyTargetItem)
+        settings.addItem(intervalItem)
         autostartToggleItem.target = self
         autostartToggleItem.action = #selector(toggleAutostart)
-        menu.addItem(autostartToggleItem)
-        menu.addItem(.separator())
-        menu.addItem(intervalItem)
-        menu.addItem(.separator())
-        let refreshMI = menu.addItem(withTitle: "Refresh now", action: #selector(refresh), keyEquivalent: "r")
-        refreshMI.target = self
-        refreshMI.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
-
-        let updateMI = menu.addItem(withTitle: "Check for updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        settings.addItem(autostartToggleItem)
+        settings.addItem(.separator())
+        let updateMI = settings.addItem(withTitle: "Check for updates…", action: #selector(checkForUpdates), keyEquivalent: "")
         updateMI.target = self
         updateMI.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
-
         let aboutItem = NSMenuItem(title: "version \(WIDGET_VERSION)", action: nil, keyEquivalent: "")
         aboutItem.isEnabled = false
         aboutItem.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil)
-        menu.addItem(aboutItem)
+        settings.addItem(aboutItem)
+        settingsItem.submenu = settings
+        settingsItem.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
+        menu.addItem(settingsItem)
+
+        let refreshMI = menu.addItem(withTitle: "Refresh now", action: #selector(refreshAll), keyEquivalent: "r")
+        refreshMI.target = self
+        refreshMI.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
 
         let quitMI = menu.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "q")
         quitMI.target = self
@@ -242,15 +312,23 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         loadAlertConfig()
         loadIntervalConfig()
         rebuildIntervalSubmenu()
-        migrateLaunchAgentIfStale()
+        if !previewMode {
+            migrateLaunchAgentIfStale()
+        }
         refreshAutostartState()
         rebuildAutostartItem()
         loadDisplayConfig()
         rebuildCompactItems()
+        rebuildFinishNotifyItem()
+        rebuildDailyTargetItem()
+        rebuildJiraItem()
+        rebuildNotifSubmenu()
+        rebuildAlertItems()
+    }
 
+    @objc func refreshAll() {
         refresh()
-        scheduleTimer()
-        scheduleUpdateCheck()
+        refreshSessions()
     }
 
     /// (Re)installs the background refresh timer at the current
@@ -266,9 +344,11 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         // refresh on dropdown open, but throttle so repeated clicks don't
         // smash the rate-limited endpoint
+        guard menu === self.menu else { return }
         if Date().timeIntervalSince(lastRefreshAt) >= ON_OPEN_COOLDOWN {
             refresh()
         }
+        refreshSessions()
     }
 
     /// Left-click → pop up the menu. Right-click (or Ctrl-click) →
@@ -286,8 +366,8 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Attach the menu and let the system open it. Detaching happens
         // in menuDidClose — detaching via async timer used to race with
         // submenu hover tracking and silently kill all child submenus.
-        statusItem.menu = menu
-        statusItem.button?.performClick(nil)
+        statusItem?.menu = menu
+        statusItem?.button?.performClick(nil)
     }
 
     func menuDidClose(_ menu: NSMenu) {
@@ -295,7 +375,7 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // routes through statusItemClicked again (preserving right-click
         // refresh). Submenu closures also call menuDidClose; ignore those.
         if menu === self.menu {
-            statusItem.menu = nil
+            statusItem?.menu = nil
         }
     }
 
@@ -326,7 +406,8 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func render(payload: [String: Any]?) {
         guard let payload else {
-            statusItem.button?.title = "claude ?"
+            usageTitle = NSAttributedString(string: "claude ?")
+            applyTrayTitle()
             setDetail(plain("Failed to fetch usage data\nIs ccusage installed? Run: npx -y ccusage@latest blocks --active"))
             return
         }
@@ -354,17 +435,19 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let isStale = lastSuccessfulRefreshAt != .distantPast &&
                       Date().timeIntervalSince(lastSuccessfulRefreshAt) >
                         Double(refreshIntervalMinutes * 60) * 2.5
+        lastPayload = payload
         let titleStr = NSMutableAttributedString()
+        usageTooltip = nil
         if compactMode {
             // Compact: provider icon(s) + %, no bar.
-            statusItem.button?.attributedTitle = makeCompactTitle(payload: payload)
+            usageTitle = makeCompactTitle(payload: payload)
         } else if let pct = fiveHourPct {
             titleStr.append(makeBar(pct: pct, width: 8))
             let pctColor = isStale ? NSColor.tertiaryLabelColor : barColor(pct)
             // Pad the digits to width 3 so the title doesn't shift left on
             // the 9→10 / 99→100 transitions; the bar is fixed-width already.
             titleStr.append(coloredText(String(format: " %3.0f%%", pct), color: pctColor))
-            statusItem.button?.attributedTitle = titleStr
+            usageTitle = titleStr
 
             // Tooltip carries the parts we stripped from the title
             var tip = String(format: "Claude · session %.0f%%", pct)
@@ -373,16 +456,17 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 tip += String(format: " · week %.0f%%", weekPct)
             }
             if isStale { tip += " · (data stale)" }
-            statusItem.button?.toolTip = tip
+            usageTooltip = tip
         } else if let a = active {
             let cost = a["costUSD"] as? Double ?? 0
             let remMin = (a["projection"] as? [String: Any])?["remainingMinutes"] as? Int ?? 0
-            statusItem.button?.title = String(format: "$%.2f · ", cost) + formatResetMinutes(remMin)
-            statusItem.button?.toolTip = "no oauth data — showing ccusage block cost"
+            usageTitle = plain(String(format: "$%.2f · ", cost) + formatResetMinutes(remMin))
+            usageTooltip = "no oauth data — showing ccusage block cost"
         } else {
-            statusItem.button?.title = "claude —"
-            statusItem.button?.toolTip = "no data — open dropdown to refresh"
+            usageTitle = plain("claude —")
+            usageTooltip = "no data — open dropdown to refresh"
         }
+        applyTrayTitle()
 
         // ── dropdown body ───────────────────────────────────────────────
         let out = NSMutableAttributedString()
@@ -442,8 +526,10 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        // Codex section — only when the user has an authenticated OpenAI Codex CLI install.
-        if let codex = payload["codex"] as? [String: Any], !codex.isEmpty {
+        // Codex, Gemini and Copilot have their own rows under this block since
+        // v0.6 (rebuildProviderRows); their full sections stay only in the
+        // headless / legacy path below and are skipped here.
+        if SHOW_ALL_PROVIDER_BLOCKS, let codex = payload["codex"] as? [String: Any], !codex.isEmpty {
             let cx5 = codex["five_hour"] as? [String: Any]
             let cx7 = codex["seven_day"] as? [String: Any]
             if cx5 != nil || cx7 != nil {
@@ -469,7 +555,7 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // Gemini Code Assist — per-model quota buckets.
-        if let gemini = payload["gemini"] as? [String: Any],
+        if SHOW_ALL_PROVIDER_BLOCKS, let gemini = payload["gemini"] as? [String: Any],
            let models = gemini["models"] as? [[String: Any]], !models.isEmpty {
             sectionSpacer()
             out.append(sectionHeader("Gemini", key: "gemini"))
@@ -487,7 +573,7 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // GitHub Copilot — chat / completions / premium quotas.
-        if let copilot = payload["copilot"] as? [String: Any], !copilot.isEmpty {
+        if SHOW_ALL_PROVIDER_BLOCKS, let copilot = payload["copilot"] as? [String: Any], !copilot.isEmpty {
             let entries: [(String, String)] = [
                 ("Chat", "chat"),
                 ("Completions", "completions"),
@@ -571,6 +657,10 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshAutostartState()
         rebuildAutostartItem()
         rebuildCompactItems()
+        rebuildTodayItem()
+        rebuildUsageSummary(fiveHourPct: fiveHourPct, resetMin: fiveHourResetMin,
+                            weekPct: sevenDay?["utilization"] as? Double,
+                            pace: fiveHourPct.flatMap { p in fiveHourResetMin.flatMap { paceOutcome(currentPct: p, minutesUntilReset: $0) } })
 
         if let pct = fiveHourPct, let resetIso = fiveHourReset {
             checkAndFireAlert(util: pct, windowResetsAt: resetIso)
@@ -767,6 +857,8 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }
         if let v = obj["compactMode"] as? Bool { compactMode = v }
+        if let h = obj["dailyTargetHours"] as? Int, DAILY_TARGET_OPTIONS.contains(h) { dailyTargetHours = h }
+        if let m = obj["finishNotifyMinutes"] as? Int, m == 0 || FINISH_NOTIFY_OPTIONS.contains(m) { finishNotifyMinutes = m }
         if let arr = obj["compactProviders"] as? [String] {
             let allowed = Set(COMPACT_PROVIDER_ORDER)
             let filtered = Set(arr).intersection(allowed)
@@ -786,6 +878,8 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let obj: [String: Any] = [
             "compactMode":      compactMode,
             "compactProviders": Array(compactProviders).sorted(),
+            "dailyTargetHours": dailyTargetHours,
+            "finishNotifyMinutes": finishNotifyMinutes,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]) else { return }
         try? data.write(to: URL(fileURLWithPath: DISPLAY_CONFIG_PATH), options: .atomic)
@@ -939,6 +1033,7 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// macOS notification via osascript. Self-contained — doesn't require
     /// Claude Code's hook infrastructure or any external script.
     func sendNotification(title: String, body: String) {
+        if previewMode { return }
         let escapedBody = body.replacingOccurrences(of: "\"", with: "\\\"")
         let escapedTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
         let script = "display notification \"\(escapedBody)\" with title \"\(escapedTitle)\" sound name \"Glass\""
@@ -1428,6 +1523,12 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // ── attributed-string helpers ───────────────────────────────────────
     static let monoFont    = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    /// Root-menu summary rows (sessions, Today, Usage): the system menu font,
+    /// so the root reads like a native menu rather than a report.
+    static let rowFont     = NSFont.menuFont(ofSize: 13)
+    static let rowMono     = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+    /// Secondary parts of the summary rows: smaller, so the rows stay narrow.
+    static let rowSmall    = NSFont.systemFont(ofSize: 11)
     /// Bold provider-name header — keep big enough to anchor the section.
     static let headerFont  = NSFont.systemFont(ofSize: 14, weight: .bold)
     /// Bold mono label for each bucket row ("Session" / "Weekly" / etc.).
@@ -1468,7 +1569,7 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// renders some colour — a plain `█`/`░` bar at `width=8` only lights
     /// the first cell at ≥6.25 %, which made small percentages look like
     /// "no fill" in the tray.
-    func makeBar(pct: Double, width: Int) -> NSAttributedString {
+    func makeBar(pct: Double, width: Int, color: NSColor? = nil) -> NSAttributedString {
         let clamped = max(0.0, min(100.0, pct))
         // 8 sub-cells per visual cell → 8 partial-fill levels.
         let totalEighths = Int((clamped / 100.0 * Double(width) * 8.0).rounded())
@@ -1478,7 +1579,7 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let m = NSMutableAttributedString()
         let fillAttrs: [NSAttributedString.Key: Any] =
-            [.font: Self.barFont, .foregroundColor: barColor(pct)]
+            [.font: Self.barFont, .foregroundColor: color ?? barColor(pct)]
         let emptyAttrs: [NSAttributedString.Key: Any] =
             [.font: Self.barFont, .foregroundColor: NSColor.tertiaryLabelColor]
 
@@ -1503,7 +1604,7 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// in an NSAttributedString attachment for inline placement in
     /// dropdown rows. Visually closer to the native macOS look than the
     /// `█░` block-glyph version.
-    func drawnBar(pct: Double, width: CGFloat = 120, height: CGFloat = 8) -> NSAttributedString {
+    func drawnBar(pct: Double, width: CGFloat = 120, height: CGFloat = 8, color: NSColor? = nil) -> NSAttributedString {
         let clamped = max(0.0, min(100.0, pct))
         let img = NSImage(size: NSSize(width: width, height: height), flipped: false) { rect in
             let radius = height / 2
@@ -1514,7 +1615,7 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let fillW = rect.width * clamped / 100.0
             if fillW > 0 {
                 let fillRect = NSRect(x: 0, y: 0, width: max(fillW, height), height: rect.height)
-                self.barColor(clamped).setFill()
+                (color ?? self.barColor(clamped)).setFill()
                 NSBezierPath(roundedRect: fillRect, xRadius: radius, yRadius: radius).fill()
             }
             return true
@@ -1723,15 +1824,14 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Pace narrative — colour-coded by outcome (red/yellow/green) so the
     /// state reads at a glance. This is our distinctive twist on the
     /// CodexBar "Pace: Behind (-X%) · Lasts to reset" format.
-    func paceNarrativeLine(currentPct: Double, minutesUntilReset: Int,
-                           activeBlock: [String: Any]? = nil) -> NSAttributedString? {
+    /// Pace outcome for the 5h window: "runs out in 1h 47m" (red),
+    /// "lasts until reset (tight)" (yellow), "lasts until reset" (green);
+    /// nil while less than PACE_MIN_ELAPSED_FRACTION of the window has passed.
+    func paceOutcome(currentPct: Double, minutesUntilReset: Int) -> (text: String, color: NSColor)? {
         let elapsed = 300 - minutesUntilReset
         guard elapsed > 0 else { return nil }
         if Double(elapsed) / 300.0 < PACE_MIN_ELAPSED_FRACTION { return nil }
         let projected = currentPct / Double(elapsed) * 300.0
-
-        let outcome: String
-        let outcomeColor: NSColor
         if projected > 100 {
             let minutesTo100 = currentPct < 100
                 ? Int(Double(elapsed) * (100 - currentPct) / currentPct)
@@ -1739,15 +1839,17 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let runOut = minutesTo100 >= 60
                 ? String(format: "%dh %02dm", minutesTo100 / 60, minutesTo100 % 60)
                 : "\(minutesTo100)m"
-            outcome = "runs out in \(runOut)"
-            outcomeColor = .systemRed
+            return ("runs out in \(runOut)", .systemRed)
         } else if projected >= 80 {
-            outcome = "lasts until reset (tight)"
-            outcomeColor = .systemYellow
-        } else {
-            outcome = "lasts until reset"
-            outcomeColor = .systemGreen
+            return ("lasts until reset (tight)", .systemYellow)
         }
+        return ("lasts until reset", .systemGreen)
+    }
+
+    func paceNarrativeLine(currentPct: Double, minutesUntilReset: Int,
+                           activeBlock: [String: Any]? = nil) -> NSAttributedString? {
+        guard let (outcome, outcomeColor) = paceOutcome(currentPct: currentPct, minutesUntilReset: minutesUntilReset)
+        else { return nil }
         let m = NSMutableAttributedString()
         // Indent to roughly align under the bar column of the bucket rows above.
         m.append(plainSized("pace      ", font: Self.paceFont, color: .secondaryLabelColor))
@@ -1798,6 +1900,38 @@ class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 // Headless mode short-circuits the Cocoa app — useful for SSH sessions,
 // scripts, cron, or status bars on remote/headless Macs. Runs usage.sh
 // once, prints a one-liner (or JSON), exits.
+if CommandLine.arguments.contains("--self-test") {
+    exit(runSelfTest() ? 0 : 1)
+}
+
+/// `--render-preview out.png [--usage usage.json] [--sessions sessions.json] [--light]`
+/// Renders the dropdown to a PNG from fixture files (or live data when a
+/// fixture is not given) without touching the menu bar or notifications.
+if let i = CommandLine.arguments.firstIndex(of: "--render-preview") {
+    let args = CommandLine.arguments
+    guard i + 1 < args.count else { fputs("usage: --render-preview out.png [--usage f] [--sessions f] [--light]\n", stderr); exit(2) }
+    func arg(_ name: String) -> String? {
+        guard let j = args.firstIndex(of: name), j + 1 < args.count else { return nil }
+        return args[j + 1]
+    }
+    func readJSON(_ path: String) -> [String: Any]? {
+        guard let d = FileManager.default.contents(atPath: path) else { return nil }
+        return try? JSONSerialization.jsonObject(with: d) as? [String: Any]
+    }
+    let nsapp = NSApplication.shared
+    nsapp.setActivationPolicy(.prohibited)
+    // Only the sessions.sh fallback: a preview must not rewrite the user's hooks.
+    ensureSupportScripts(hooksDir: NSTemporaryDirectory() + "cub-preview-no-hooks")
+    let preview = App()
+    preview.previewMode = true
+    preview.buildMenu()
+    preview.render(payload: arg("--usage").flatMap(readJSON) ?? runJSONScript(SCRIPT_PATH))
+    preview.applySessions(SessionsSnapshot.parse(arg("--sessions").flatMap(readJSON) ?? runJSONScript(SESSIONS_SCRIPT_PATH)))
+    let ok = renderMenuPreview(app: preview, to: args[i + 1], dark: !args.contains("--light"))
+    print(ok ? "preview: \(args[i + 1])" : "preview failed")
+    exit(ok ? 0 : 1)
+}
+
 if CommandLine.arguments.contains("--headless") {
     runHeadless(asJSON: CommandLine.arguments.contains("--json"))
     exit(0)

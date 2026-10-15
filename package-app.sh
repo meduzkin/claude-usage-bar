@@ -37,8 +37,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BIN" "$APP/Contents/MacOS/$BIN"
 chmod +x "$APP/Contents/MacOS/$BIN"
-cp usage.sh notif.sh "$APP/Contents/Resources/"
-chmod +x "$APP/Contents/Resources/usage.sh" "$APP/Contents/Resources/notif.sh"
+cp usage.sh notif.sh sessions.sh jira.py "$APP/Contents/Resources/"
+chmod +x "$APP/Contents/Resources/usage.sh" "$APP/Contents/Resources/notif.sh" "$APP/Contents/Resources/sessions.sh" "$APP/Contents/Resources/jira.py"
 
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
