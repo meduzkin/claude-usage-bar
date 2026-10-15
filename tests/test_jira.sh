@@ -67,6 +67,6 @@ check "check returns the user" "$(jira check | jq -r .name)" "Me Myself"
 r=$(TOKEN=bad-secret-token jira check)
 check "bad token: readable error" "$(printf '%s' "$r" | jq -r .error)" "HTTP 401 (check email and token)"
 check "bad token: token not printed" "$(printf '%s' "$r" | grep -c bad-secret-token)" "0"
-check "not connected" "$(JIRA_CONFIG="$d/none.json" JIRA_EMAIL= JIRA_SITE= JIRA_TOKEN= python3 "$here/jira.py" check | jq -r .error)" "not connected"
+check "not connected" "$(JIRA_CONFIG="$d/none.json" JIRA_EMAIL='' JIRA_SITE='' JIRA_TOKEN='' python3 "$here/jira.py" check | jq -r .error)" "not connected"
 check "plain http refused" "$(JIRA_CONFIG="$d/none.json" JIRA_SITE="http://127.0.0.1:$port" JIRA_EMAIL=me@x.com JIRA_TOKEN=good python3 "$here/jira.py" check | jq -r .error)" "site must start with https://"
 exit $fail
