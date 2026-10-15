@@ -451,12 +451,14 @@ extension App {
         let spend = spendTodayAndWeek()
         guard today != nil || spend != nil else { todayItem.isHidden = true; return }
         todayItem.isHidden = false
-        todayItem.image = jiraConfig.isConfigured || today != nil ? jiraMark()
-                        : tintedSymbol(name: "calendar", color: .secondaryLabelColor)
+        todayItem.image = today != nil ? jiraMark()
+                        : tintedSymbol(name: "dollarsign.circle", color: .secondaryLabelColor)
 
         // "Jira" when there is logged time (built-in Jira or today.json);
-        // otherwise the row only carries the ccusage spend and says so.
-        let row = NSMutableAttributedString(attributedString: plainSized(today != nil ? "Jira  " : "Spend  ", font: Self.rowFont))
+        // otherwise the row only carries the ccusage cost and says so.
+        // ccusage prices local token counts at API list prices: on a
+        // subscription that is not money spent, hence "API cost" / "≈".
+        let row = NSMutableAttributedString(attributedString: plainSized(today != nil ? "Jira  " : "API cost  ", font: Self.rowFont))
         var details: [String] = []
         if let t = today {
             let target = t.targetSeconds ?? dailyTargetHours * 3600
@@ -474,10 +476,10 @@ extension App {
         }
         if let (day, week) = spend {
             if today == nil {
-                row.append(plainSized(String(format: "$%.2f today", day), font: Self.rowSmall, color: .secondaryLabelColor))
+                row.append(plainSized(String(format: "≈ $%.2f today", day), font: Self.rowSmall, color: .secondaryLabelColor))
             }
-            details.append(String(format: "$%.2f spent today", day))
-            if let w = week { details.append(String(format: "$%.0f spent this week", w)) }
+            details.append(String(format: "≈ $%.2f today at API prices", day))
+            if let w = week { details.append(String(format: "≈ $%.0f this week at API prices", w)) }
         }
         todayItem.attributedTitle = row
         let sub = NSMenu()

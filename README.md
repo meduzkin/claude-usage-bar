@@ -7,7 +7,7 @@
 
 > macOS menu-bar widget for AI coding agents. It lists your running Claude Code sessions and shows which ones wait on you, notifies you when a session blocks on a permission prompt or finishes a long job, alerts on usage thresholds, and shows usage bars for Claude / Codex / Gemini / Copilot.
 
-![claude-usage-bar dropdown](docs/screenshot.png?v=0.6.0)
+![claude-usage-bar dropdown](docs/screenshot.png?v=0.6.1)
 
 ## Sessions
 
@@ -43,7 +43,8 @@ The list refreshes every 10 seconds and when you open the dropdown. `sessions.sh
 
 - **Claude**: the full block in the root (Session / Weekly / model buckets with bars, pace) and `details ›`.
 - **Other agents**: Codex, Gemini and Copilot, when they have data, get one row each under it: headline % and reset time, with their buckets in the row's submenu.
-- **Jira** (last in the block, with a Jira-style mark): time you logged today against a daily target (6–10 h, default 8, in `Settings ›`) and open sessions without a task. The submenu adds the number of tasks and today's and this week's spend from `ccusage`. Logged time comes from [Jira](#jira-optional) when connected, else from the optional `today.json`. Without either, the row is called **Spend** and shows only today's spend.
+- **Jira** (last in the block, with a Jira-style mark): time you logged today against a daily target (6–10 h, default 8, in `Settings ›`) and open sessions without a task. The submenu adds the number of tasks and today's and this week's cost from `ccusage`. Logged time comes from [Jira](#jira-optional) when connected, else from the optional `today.json`. Without either, the row is called **API cost** and shows only today's cost.
+- **About the dollar figures**: `ccusage` counts the tokens in your local Claude Code transcripts and prices them at API list prices. On a Pro / Max subscription that is what the same usage would cost through the API, not what you pay, hence the `≈` and "at API prices".
 
 ## Notifications
 

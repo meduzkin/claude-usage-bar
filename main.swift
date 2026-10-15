@@ -102,7 +102,7 @@ func blockTotalTokens(_ d: [String: Any]) -> Int {
 
 // Widget version, bumped manually each release. Compared against the
 // `tag_name` of the latest release fetched from the configured source.
-let WIDGET_VERSION = "0.6.0"
+let WIDGET_VERSION = "0.6.1"
 // Default update source. Overridable at runtime by ~/.cache/claude-usage-bar/update.json
 // — install.sh writes that file pointing at the distribution it came from
 // (GitHub Releases for the standalone repo, GitLab Releases for the
