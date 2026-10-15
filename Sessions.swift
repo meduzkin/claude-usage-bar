@@ -824,19 +824,24 @@ func runSelfTest() -> Bool {
     let oldOurs = "#!/bin/bash\n# the claude-usage-bar widget writes the delay\nold\n"
     try? oldOurs.write(toFile: tmp + "/hooks/claude-notify.sh", atomically: true, encoding: .utf8)
     try? "#!/bin/bash\n# my own cancel hook\n".write(toFile: tmp + "/hooks/claude-notify-cancel.sh", atomically: true, encoding: .utf8)
-    let saved = SESSIONS_SCRIPT_PATH
+    // Both bundled scripts point at a missing folder, so the result does not
+    // depend on whether sessions.sh / jira.py happen to sit next to the binary.
+    let saved = SESSIONS_SCRIPT_PATH, savedJira = JIRA_SCRIPT_PATH
     SESSIONS_SCRIPT_PATH = tmp + "/missing/sessions.sh"
+    JIRA_SCRIPT_PATH = tmp + "/missing/jira.py"
     let changed = ensureSupportScripts(fm: fm, supportDir: tmp + "/support", hooksDir: tmp + "/hooks")
     let notify = (try? String(contentsOfFile: tmp + "/hooks/claude-notify.sh", encoding: .utf8)) ?? ""
-    check("support: missing sessions.sh restored from the binary",
-          SESSIONS_SCRIPT_PATH == tmp + "/support/sessions.sh" && fm.isExecutableFile(atPath: SESSIONS_SCRIPT_PATH))
+    check("support: missing sessions.sh and jira.py restored from the binary",
+          SESSIONS_SCRIPT_PATH == tmp + "/support/sessions.sh" && fm.isExecutableFile(atPath: SESSIONS_SCRIPT_PATH)
+          && JIRA_SCRIPT_PATH == tmp + "/support/jira.py" && fm.isExecutableFile(atPath: JIRA_SCRIPT_PATH))
     check("support: our old hook upgraded, backup kept",
           notify.contains("claude-waiting-") && (try? String(contentsOfFile: tmp + "/hooks/claude-notify.sh.bak", encoding: .utf8)) == oldOurs)
     check("support: foreign hook untouched",
           (try? String(contentsOfFile: tmp + "/hooks/claude-notify-cancel.sh", encoding: .utf8)) == "#!/bin/bash\n# my own cancel hook\n")
     check("support: second run changes nothing",
-          changed.count == 2 && ensureSupportScripts(fm: fm, supportDir: tmp + "/support", hooksDir: tmp + "/hooks").isEmpty)
+          changed.count == 3 && ensureSupportScripts(fm: fm, supportDir: tmp + "/support", hooksDir: tmp + "/hooks").isEmpty)
     SESSIONS_SCRIPT_PATH = saved
+    JIRA_SCRIPT_PATH = savedJira
     try? fm.removeItem(atPath: tmp)
 
     if failures.isEmpty {
